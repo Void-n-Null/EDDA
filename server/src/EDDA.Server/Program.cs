@@ -17,7 +17,7 @@ class Program
         while (true)
         {
             count++;
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] I'm running in the basement! (tick #{count})");
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [SRV] I'm running in the basement! (tick #{count})");
             Thread.Sleep(2000); // 2 seconds
         }
     }
