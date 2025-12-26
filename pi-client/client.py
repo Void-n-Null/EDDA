@@ -8,6 +8,8 @@ import sys
 import numpy as np
 from scipy import signal
 from datetime import datetime
+from collections import deque
+import torch
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -27,6 +29,22 @@ TARGET_RATE = config['audio'].get('target_rate', 16000)
 CHUNK_SIZE = config['audio'].get('chunk_size', 1440)
 CHANNELS = config['audio'].get('channels', 1)
 RECONNECT_DELAY = 3  # seconds
+
+# VAD settings
+VAD_THRESHOLD = 0.5  # Speech probability threshold (0.0-1.0)
+VAD_SAMPLE_RATE = 16000  # Silero VAD expects 16kHz
+PRE_BUFFER_CHUNKS = 10  # Keep 10 chunks (~300ms) before speech starts
+
+# Load Silero VAD model
+print("Loading Silero VAD model...")
+vad_model, vad_utils = torch.hub.load(
+    repo_or_dir='snakers4/silero-vad',
+    model='silero_vad',
+    force_reload=False,
+    onnx=False
+)
+(get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks) = vad_utils
+print("Silero VAD model loaded.")
 
 def resample_audio(audio_data: bytes, src_rate: int, dst_rate: int) -> bytes:
     """Resample audio from src_rate to dst_rate."""
@@ -90,11 +108,51 @@ def audio_level_bar(rms: float, max_rms: float = 5000, width: int = 30) -> str:
     filled = int(level * width)
     return '█' * filled + '░' * (width - filled)
 
+def detect_speech(audio_bytes: bytes, sample_rate: int = VAD_SAMPLE_RATE) -> float:
+    """
+    Detect speech in audio using Silero VAD.
+    Returns speech probability (0.0-1.0).
+    
+    Silero VAD is VERY picky: needs EXACTLY 512 samples at 16kHz (or 256 at 8kHz).
+    """
+    try:
+        # Convert bytes to float32 tensor normalized to [-1, 1]
+        samples = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        
+        # Silero VAD needs EXACTLY 512 samples at 16kHz (or 256 at 8kHz)
+        required_samples = 512 if sample_rate == 16000 else 256
+        
+        if len(samples) < required_samples:
+            print(f"\n[VAD DEBUG] Too short: got {len(samples)}, need {required_samples}")
+            return 0.0  # Too short, assume no speech
+        
+        # Take exactly the required number of samples (slice if longer)
+        samples = samples[:required_samples]
+        
+        audio_tensor = torch.from_numpy(samples)
+        
+        # Silero VAD expects 16kHz mono audio
+        with torch.no_grad():
+            speech_prob = vad_model(audio_tensor, sample_rate).item()
+        
+        return speech_prob
+    except Exception as e:
+        print(f"\n[VAD ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return 0.0
+
 async def stream_audio(websocket, stream):
-    """Stream audio to the connected websocket."""
-    print("Streaming audio...")
+    """Stream audio to the connected websocket with VAD-based filtering."""
+    print("Streaming audio with Silero VAD...")
     chunk_count = 0
     last_log_time = datetime.now()
+    
+    # Pre-buffer for capturing speech onset
+    pre_buffer = deque(maxlen=PRE_BUFFER_CHUNKS)
+    is_speaking = False
+    silence_chunks = 0
+    max_silence_chunks = 15  # ~450ms of silence to end speech segment
     
     while True:
         data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
@@ -103,26 +161,88 @@ async def stream_audio(websocket, stream):
         # Calculate audio level for monitoring
         raw_rms = calculate_rms(data)
         
-        # Resample from capture rate to target rate (16kHz for Whisper)
+        # Resample from capture rate to target rate (16kHz for Whisper and VAD)
         resampled_data = resample_audio(data, CAPTURE_RATE, TARGET_RATE)
+        
+        # Detect speech using Silero VAD
+        try:
+            speech_prob = detect_speech(resampled_data, VAD_SAMPLE_RATE)
+            is_speech = speech_prob > VAD_THRESHOLD
+        except Exception as e:
+            print(f"\n[ERROR] VAD failed: {e}")
+            speech_prob = 0.0
+            is_speech = False
         
         # Log audio levels periodically (every 100ms for smooth updates)
         now = datetime.now()
         if (now - last_log_time).total_seconds() >= 0.1:
             bar = audio_level_bar(raw_rms)
-            is_loud = "🎤 SPEECH" if raw_rms > 500 else "        "
+            speech_indicator = f"🎤 SPEECH ({speech_prob:.2f})" if is_speech else f"        ({speech_prob:.2f})"
             # Overwrite same line with \r
-            print(f"\r[AUDIO] {bar} {raw_rms:5.0f} {is_loud}", end="", flush=True)
+            print(f"\r[AUDIO] {bar} {raw_rms:5.0f} {speech_indicator}", end="", flush=True)
             last_log_time = now
         
-        # Encode to base64 for JSON
-        encoded_data = base64.b64encode(resampled_data).decode('utf-8')
-        message = {
-            "type": "audio_chunk",
-            "data": encoded_data,
-            "timestamp": datetime.now().isoformat()
-        }
-        await websocket.send(json.dumps(message))
+        # Speech detection state machine
+        if is_speaking:
+            # Currently in speech segment
+            if is_speech:
+                # Continue speech
+                silence_chunks = 0
+                encoded_data = base64.b64encode(resampled_data).decode('utf-8')
+                message = {
+                    "type": "audio_chunk",
+                    "data": encoded_data,
+                    "timestamp": datetime.now().isoformat()
+                }
+                await websocket.send(json.dumps(message))
+            else:
+                # Potential end of speech, count silence
+                silence_chunks += 1
+                if silence_chunks >= max_silence_chunks:
+                    # End of speech segment
+                    is_speaking = False
+                    silence_chunks = 0
+                    print()  # Newline after speech segment
+                    print("[AUDIO] Speech segment ended")
+                else:
+                    # Still in grace period, send the chunk
+                    encoded_data = base64.b64encode(resampled_data).decode('utf-8')
+                    message = {
+                        "type": "audio_chunk",
+                        "data": encoded_data,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    await websocket.send(json.dumps(message))
+        else:
+            # Not currently speaking
+            if is_speech:
+                # Start of speech! Flush pre-buffer and start streaming
+                is_speaking = True
+                silence_chunks = 0
+                print()  # Newline before new segment
+                print("[AUDIO] Speech detected, flushing pre-buffer and streaming...")
+                
+                # Send pre-buffered chunks
+                for buffered_chunk in pre_buffer:
+                    encoded_data = base64.b64encode(buffered_chunk).decode('utf-8')
+                    message = {
+                        "type": "audio_chunk",
+                        "data": encoded_data,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    await websocket.send(json.dumps(message))
+                
+                # Send current chunk
+                encoded_data = base64.b64encode(resampled_data).decode('utf-8')
+                message = {
+                    "type": "audio_chunk",
+                    "data": encoded_data,
+                    "timestamp": datetime.now().isoformat()
+                }
+                await websocket.send(json.dumps(message))
+            else:
+                # No speech, add to pre-buffer
+                pre_buffer.append(resampled_data)
 
 async def connect_and_stream(p, device_index):
     """Connect to server and stream. Retries forever on failure."""
