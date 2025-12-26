@@ -8,8 +8,9 @@
       "group": "build",
       "presentation": {
         "reveal": "always",
-        "panel": "dedicated",
-        "focus": true
+        "panel": "new",
+        "focus": true,
+        "group": "edda-dev"
       },
       "problemMatcher": []
     },
@@ -23,8 +24,9 @@
       },
       "presentation": {
         "reveal": "always",
-        "panel": "dedicated",
-        "focus": true
+        "panel": "new",
+        "focus": true,
+        "group": "edda-dev"
       },
       "problemMatcher": []
     },
@@ -36,6 +38,11 @@
       ],
       "dependsOrder": "parallel",
       "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "group": "edda-dev"
+      },
       "problemMatcher": []
     },
     {
