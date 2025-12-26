@@ -1,5 +1,9 @@
 pyaudio==0.2.13
 websockets==12.0
 pyyaml
+numpy<2.0.0
 scipy
+torch==2.1.0
+torchaudio==2.1.0
+packaging
 
