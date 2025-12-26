@@ -3,8 +3,8 @@ server:
   port: 8080
 
 audio:
-  # Capture at 44.1kHz (HyperX SoloCast native), resample to 16kHz for Whisper
+  # Capture at 44.1kHz (HyperX SoloCast native), resample to 16kHz for Whisper/VAD
   capture_rate: 44100
   target_rate: 16000
-  chunk_size: 1323  # 30ms at 44.1kHz
+  chunk_size: 1412  # 32ms at 44.1kHz → 512 samples at 16kHz (Silero needs EXACTLY 512, was getting 511!)
   channels: 1
