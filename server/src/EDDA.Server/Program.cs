@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Whisper.net;
 using Whisper.net.Ggml;
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Net.WebSockets;
 using System.Text;
@@ -41,12 +42,23 @@ void LogDebug(string location, string message, object? data = null, string? hypo
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
+// Tunables (env overrides)
+var whisperThreads = ParseIntEnv("WHISPER_THREADS", defaultValue: Math.Max(1, Environment.ProcessorCount));
+var silenceSeconds = ParseDoubleEnv("WHISPER_SILENCE_SECONDS", defaultValue: 1.5);
+var maxAudioSeconds = ParseDoubleEnv("WHISPER_MAX_AUDIO_SECONDS", defaultValue: 8.0);
+var sampleRate = ParseIntEnv("WHISPER_SAMPLE_RATE", defaultValue: 16000);
+var bytesPerSecond = sampleRate * 2; // 16-bit mono PCM
+var maxAudioBytes = (long)(maxAudioSeconds * bytesPerSecond);
+var minAudioBytes = bytesPerSecond; // ~1s minimum
+
 // Whisper model setup
 WhisperFactory? _whisperFactory = null;
+string? _whisperModelPath = null;
 
 async Task InitializeWhisper()
 {
     var envPath = Environment.GetEnvironmentVariable("WHISPER_MODEL_PATH");
+    var isCustomModelPath = !string.IsNullOrEmpty(envPath);
     var absoluteModelPath = !string.IsNullOrEmpty(envPath) 
         ? envPath 
         : Path.GetFullPath("models/ggml-large-v3-turbo.bin");
@@ -59,7 +71,13 @@ async Task InitializeWhisper()
 
     if (!File.Exists(absoluteModelPath))
     {
-        Console.WriteLine($"[SRV] Model not found at {absoluteModelPath}. Downloading...");
+        if (isCustomModelPath)
+        {
+            Console.WriteLine($"[SRV] CRITICAL: WHISPER_MODEL_PATH was set but model file does not exist: {absoluteModelPath}");
+            return;
+        }
+
+        Console.WriteLine($"[SRV] Model not found at {absoluteModelPath}. Attempting download...");
         try 
         {
              // Fallback to manual download URL if not available via GgmlType enum yet (v1.9.0 might support it)
@@ -89,6 +107,7 @@ async Task InitializeWhisper()
         try 
         {
             _whisperFactory = WhisperFactory.FromPath(absoluteModelPath);
+            _whisperModelPath = absoluteModelPath;
             Console.WriteLine($"[SRV] Whisper initialized with model: {absoluteModelPath}");
         }
         catch (Exception ex)
@@ -144,17 +163,22 @@ async Task HandleConnection(WebSocket webSocket)
             
             // #region agent log
             var timeSinceLastSpeech = (DateTime.UtcNow - lastSpeechTime).TotalSeconds;
-            LogDebug("Program.cs:silenceCheck", "Silence check iteration", new { bufferSize = audioStream.Length, timeSinceLastSpeech, threshold = 1.5 }, "C");
+            LogDebug("Program.cs:silenceCheck", "Silence check iteration", new { bufferSize = audioStream.Length, timeSinceLastSpeech, threshold = silenceSeconds, maxAudioBytes }, "C");
             // #endregion
             
-            // Trigger transcription when: we have audio AND no speech detected for 1.5 seconds
-            if (audioStream.Length > 16000 && timeSinceLastSpeech > 1.5) // Min 1 second of audio at 16kHz
+            // Trigger transcription when:
+            // - We have enough audio AND no speech detected for N seconds
+            // - OR we have buffered too much audio (prevents huge, slow transcriptions)
+            var shouldFlushOnSilence = audioStream.Length > minAudioBytes && timeSinceLastSpeech > silenceSeconds;
+            var shouldFlushOnMax = audioStream.Length >= maxAudioBytes;
+
+            if (shouldFlushOnSilence || shouldFlushOnMax)
             {
                 var audioData = audioStream.ToArray();
                 audioStream.SetLength(0); // Clear buffer immediately
                 
                 // #region agent log
-                LogDebug("Program.cs:silenceCheck", "Silence detected, triggering transcription", new { audioBytes = audioData.Length }, "C");
+                LogDebug("Program.cs:silenceCheck", "Triggering transcription", new { audioBytes = audioData.Length, shouldFlushOnSilence, shouldFlushOnMax }, "C");
                 // #endregion
                 
                 Console.WriteLine($"[SRV] Processing {audioData.Length} bytes of audio with Whisper...");
@@ -189,20 +213,13 @@ async Task HandleConnection(WebSocket webSocket)
                     {
                         var audioData = Convert.FromBase64String(dataBase64);
                         
-                        // Simple energy-based Voice Activity Detection
-                        var energy = CalculateAudioEnergy(audioData);
-                        var isSpeech = energy > 500; // Threshold for speech detection (tune as needed)
-                        
+                        // Client now handles VAD - if we receive audio, it's speech
                         await audioStream.WriteAsync(audioData, 0, audioData.Length);
                         lastChunkTime = DateTime.UtcNow;
-                        
-                        if (isSpeech)
-                        {
-                            lastSpeechTime = DateTime.UtcNow; // Update only when we detect actual speech
-                        }
+                        lastSpeechTime = DateTime.UtcNow; // All received audio is speech from client's VAD
                         
                         // #region agent log
-                        LogDebug("Program.cs:HandleConnection", "Audio chunk processed", new { decodedBytes = audioData.Length, totalBufferSize = audioStream.Length, energy, isSpeech }, "B");
+                        LogDebug("Program.cs:HandleConnection", "Audio chunk processed", new { decodedBytes = audioData.Length, totalBufferSize = audioStream.Length }, "B");
                         // #endregion
                     }
                 }
@@ -246,9 +263,12 @@ async Task TranscribeAudio(byte[] audioData)
         LogDebug("Program.cs:TranscribeAudio", "Creating Whisper processor", null, "E");
         // #endregion
         
-        using var processor = _whisperFactory.CreateBuilder()
-            .WithLanguage("en")
-            .Build();
+        var whisperBuilder = _whisperFactory.CreateBuilder()
+            .WithLanguage("en");
+
+        whisperBuilder = ConfigureWhisperThreads(whisperBuilder, whisperThreads);
+
+        using var processor = whisperBuilder.Build();
 
         // #region agent log
         LogDebug("Program.cs:TranscribeAudio", "Processor created, preparing WAV", null, "E");
@@ -256,7 +276,7 @@ async Task TranscribeAudio(byte[] audioData)
 
         // Prepare memory stream for WAV data
         using var memoryStream = new MemoryStream();
-        await WriteWavHeader(memoryStream, audioData, 16000);
+        WriteWavHeader(memoryStream, audioData, sampleRate);
         memoryStream.Position = 0;
 
         // #region agent log
@@ -266,6 +286,7 @@ async Task TranscribeAudio(byte[] audioData)
         Console.Write("[SRV] TRANSCRIPTION: ");
         var fullText = new StringBuilder();
         var segmentCount = 0;
+        var sw = Stopwatch.StartNew();
 
         await foreach (var segment in processor.ProcessAsync(memoryStream))
         {
@@ -277,7 +298,34 @@ async Task TranscribeAudio(byte[] audioData)
             LogDebug("Program.cs:TranscribeAudio", "Segment received", new { segmentNum = segmentCount, text = segment.Text, start = segment.Start, end = segment.End }, "F");
             // #endregion
         }
+
+        sw.Stop();
         Console.WriteLine(); // Newline after segments
+
+        // Telemetry: how long did STT take vs how much audio we fed it?
+        var elapsedMs = Math.Max(1, sw.ElapsedMilliseconds);
+        var audioSeconds = audioData.Length / (double)bytesPerSecond;
+        var msPerSecondAudio = audioSeconds > 0 ? (elapsedMs / audioSeconds) : double.PositiveInfinity;
+        var realtimeFactor = audioSeconds > 0 ? ((audioSeconds * 1000.0) / elapsedMs) : 0.0;
+        var bytesPerMs = audioData.Length / (double)elapsedMs;
+
+        var telemetry = new
+        {
+            audioBytes = audioData.Length,
+            audioSeconds = Math.Round(audioSeconds, 3),
+            sampleRate,
+            whisperThreads,
+            modelPath = _whisperModelPath ?? "(unknown)",
+            elapsedMs,
+            realtimeFactor = Math.Round(realtimeFactor, 3),
+            msPerSecondAudio = Math.Round(msPerSecondAudio, 1),
+            bytesPerMs = Math.Round(bytesPerMs, 1),
+            segments = segmentCount,
+            textChars = fullText.Length
+        };
+
+        Console.WriteLine($"[SRV] STT telemetry: bytes={telemetry.audioBytes} audio_s={telemetry.audioSeconds} ms={telemetry.elapsedMs} xRT={telemetry.realtimeFactor} ms_per_s={telemetry.msPerSecondAudio} bytes_per_ms={telemetry.bytesPerMs} threads={telemetry.whisperThreads} sr={telemetry.sampleRate} segs={telemetry.segments}");
+        LogDebug("Program.cs:TranscribeAudio", "STT telemetry", telemetry, "T");
         
         // #region agent log
         LogDebug("Program.cs:TranscribeAudio", "Transcription complete", new { totalSegments = segmentCount, fullText = fullText.ToString() }, "F");
@@ -292,19 +340,7 @@ async Task TranscribeAudio(byte[] audioData)
     }
 }
 
-double CalculateAudioEnergy(byte[] audioData)
-{
-    // Calculate RMS energy of 16-bit PCM audio
-    double sum = 0;
-    for (int i = 0; i < audioData.Length - 1; i += 2)
-    {
-        short sample = (short)(audioData[i] | (audioData[i + 1] << 8));
-        sum += sample * sample;
-    }
-    return Math.Sqrt(sum / (audioData.Length / 2));
-}
-
-async Task WriteWavHeader(Stream stream, byte[] pcmData, int sampleRate)
+void WriteWavHeader(Stream stream, byte[] pcmData, int sampleRate)
 {
     // Write WAV header directly to the stream
     using var bw = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
@@ -327,3 +363,43 @@ async Task WriteWavHeader(Stream stream, byte[] pcmData, int sampleRate)
 
 Console.WriteLine("EDDA Server starting...");
 app.Run("http://0.0.0.0:8080");
+
+static int ParseIntEnv(string key, int defaultValue)
+{
+    var v = Environment.GetEnvironmentVariable(key);
+    return int.TryParse(v, out var parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
+static double ParseDoubleEnv(string key, double defaultValue)
+{
+    var v = Environment.GetEnvironmentVariable(key);
+    return double.TryParse(v, out var parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
+static dynamic ConfigureWhisperThreads(dynamic builder, int threads)
+{
+    try
+    {
+        var t = (object)builder;
+        var type = t.GetType();
+
+        // Try common method names across versions without hard dependency.
+        var withThreads = type.GetMethod("WithThreads", new[] { typeof(int) });
+        if (withThreads != null)
+        {
+            return withThreads.Invoke(t, new object[] { threads })!;
+        }
+
+        var withMaxThreads = type.GetMethod("WithMaxThreads", new[] { typeof(int) });
+        if (withMaxThreads != null)
+        {
+            return withMaxThreads.Invoke(t, new object[] { threads })!;
+        }
+    }
+    catch
+    {
+        // Ignore; fall back to library defaults.
+    }
+
+    return builder;
+}

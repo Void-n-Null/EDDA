@@ -9,7 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="Anthropic.SDK" Version="5.8.0" />
-    <!-- Downgraded to 1.8.1 which uses CUDA 12 (1.9.0 requires CUDA 13) -->
+    <!-- CUDA-enabled whisper.cpp runtime via Whisper.net (GPU acceleration) -->
     <PackageReference Include="Whisper.net" Version="1.8.1" />
     <PackageReference Include="Whisper.net.Runtime.Cuda" Version="1.8.1" />
   </ItemGroup>
