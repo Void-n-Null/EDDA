@@ -7,7 +7,7 @@ SERVER_DIR="/home/blake/edda-server"
 echo "Deploying EDDA server to basement..."
 
 # Create directory on server if it doesn't exist
-ssh $SERVER_HOST "mkdir -p $SERVER_DIR"
+ssh $SERVER_HOST "mkdir -p $SERVER_DIR && mkdir -p $SERVER_DIR/models"
 
 # Sync the C# project
 echo "Syncing C# server..."
@@ -15,6 +15,7 @@ rsync -avz --delete \
   --exclude 'bin/' \
   --exclude 'obj/' \
   --exclude '.git/' \
+  --exclude 'models/' \
   server/src/ $SERVER_HOST:$SERVER_DIR/
 
 echo "Building on server..."

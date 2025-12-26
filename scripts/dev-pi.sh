@@ -12,7 +12,7 @@ ssh $PI_HOST "mkdir -p $PI_DIR"
 
 # Create venv if needed
 echo "--- Setting up Python environment..."
-ssh $PI_HOST "cd $PI_DIR && if [ ! -d venv ]; then python3 -m venv venv; fi"
+ssh $PI_HOST "cd $PI_DIR && if [ ! -d venv ]; then python3 -m venv venv; fi && ./venv/bin/pip install -r requirements.txt"
 
 # Sync files
 echo "--- Syncing files..."
@@ -32,4 +32,4 @@ echo "--- Starting client and streaming logs..."
 echo "------------------------------------------------"
 echo ""
 
-ssh $PI_HOST "cd $PI_DIR && python3 -u client.py"
+ssh $PI_HOST "cd $PI_DIR && ./venv/bin/python3 -u client.py"
