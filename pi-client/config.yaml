@@ -3,6 +3,8 @@ server:
   port: 8080
 
 audio:
-  sample_rate: 16000
-  chunk_size: 480
+  # Capture at 44.1kHz (HyperX SoloCast native), resample to 16kHz for Whisper
+  capture_rate: 44100
+  target_rate: 16000
+  chunk_size: 1323  # 30ms at 44.1kHz
   channels: 1
