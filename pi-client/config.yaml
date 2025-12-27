@@ -6,5 +6,24 @@ audio:
   # Capture at 44.1kHz (HyperX SoloCast native), resample to 16kHz for Whisper/VAD
   capture_rate: 44100
   target_rate: 16000
-  chunk_size: 1412  # 32ms at 44.1kHz → 512 samples at 16kHz (Silero needs EXACTLY 512, was getting 511!)
+  chunk_size: 1412  # 32ms at 44.1kHz → 512 samples at 16kHz (Silero needs EXACTLY 512)
   channels: 1
+  input_device_name: "SoloCast"  # Substring match for input device
+  stall_timeout: 5.0  # Seconds before treating audio device as stalled
+
+vad:
+  # Speech detection threshold (0.0-1.0)
+  # Higher = less sensitive, lower = more sensitive
+  threshold: 0.5
+  
+  # Pre-buffer duration in milliseconds
+  # Audio to keep before speech starts (prevents word clipping)
+  pre_buffer_ms: 300.0
+  
+  # Silence duration in milliseconds before ending speech
+  # How long to wait after speech stops before sending end_speech
+  silence_duration_ms: 900.0
+
+network:
+  # Reconnection delay in seconds after connection failure
+  reconnect_delay: 3
