@@ -22,6 +22,16 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+# ============================================================================
+# CUDA Optimizations (must be set before model loading)
+# ============================================================================
+if torch.cuda.is_available():
+    # Auto-tune CUDA kernels for the specific GPU
+    torch.backends.cudnn.benchmark = True
+    # Allow TF32 on Ampere+ GPUs (ignored on older GPUs like 2070)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +53,15 @@ class Config:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     
     # Performance options
-    USE_TORCH_COMPILE: bool = os.getenv("TTS_TORCH_COMPILE", "false").lower() == "true"
+    # torch.compile gives ~20-40% speedup after warmup (requires PyTorch 2.0+)
+    # Enable by default on CUDA, disable on CPU (compile doesn't help much there)
+    USE_TORCH_COMPILE: bool = os.getenv(
+        "TTS_TORCH_COMPILE", 
+        "true" if torch.cuda.is_available() else "false"
+    ).lower() == "true"
+    
+    # Number of warmup iterations (more = better perf but slower startup)
+    WARMUP_ITERATIONS: int = int(os.getenv("TTS_WARMUP_ITERATIONS", "3"))
     
     # Audio settings
     SAMPLE_RATE: int = 24000  # Chatterbox native sample rate
@@ -159,22 +177,23 @@ class TTSModel:
             logger.warning(f"Device verification failed: {e}")
     
     def _warmup(self):
-        """Run warmup inferences to prime CUDA kernels."""
-        logger.info("Running warmup inference...")
+        """Run warmup inferences to prime CUDA kernels and torch.compile."""
+        logger.info(f"Running {Config.WARMUP_ITERATIONS} warmup iterations...")
         
         try:
-            # First warmup - CUDA kernel compilation
             with torch.inference_mode():
-                start = time.perf_counter()
-                _ = self.model.generate(Config.WARMUP_TEXT)
-                warmup1_ms = (time.perf_counter() - start) * 1000
-                logger.info(f"Warmup 1 complete in {warmup1_ms:.0f}ms")
+                for i in range(Config.WARMUP_ITERATIONS):
+                    start = time.perf_counter()
+                    _ = self.model.generate(Config.WARMUP_TEXT)
+                    warmup_ms = (time.perf_counter() - start) * 1000
+                    
+                    if i == 0:
+                        logger.info(f"Warmup {i+1}/{Config.WARMUP_ITERATIONS}: {warmup_ms:.0f}ms (first run, compiling)")
+                    else:
+                        logger.info(f"Warmup {i+1}/{Config.WARMUP_ITERATIONS}: {warmup_ms:.0f}ms")
                 
-                # Second warmup - should be faster, represents actual perf
-                start = time.perf_counter()
-                _ = self.model.generate(Config.WARMUP_TEXT)
-                warmup2_ms = (time.perf_counter() - start) * 1000
-                logger.info(f"Warmup 2 complete in {warmup2_ms:.0f}ms (this is expected perf)")
+                # Report expected performance from last warmup
+                logger.info(f"Warmup complete. Expected inference time: ~{warmup_ms:.0f}ms")
         except Exception as e:
             logger.warning(f"Warmup failed (non-fatal): {e}")
     
@@ -357,9 +376,6 @@ async def text_to_speech(request: TTSRequest):
         )
         generation_ms = (time.perf_counter() - gen_start) * 1000
         
-        # Log the device the output came from (sanity check)
-        output_device = str(audio.device) if hasattr(audio, 'device') else 'unknown'
-        
         # Convert to WAV bytes
         encode_start = time.perf_counter()
         wav_buffer = io.BytesIO()
@@ -387,7 +403,7 @@ async def text_to_speech(request: TTSRequest):
         rtf = generation_ms / (audio_duration_s * 1000)  # Real-time factor
         
         logger.info(
-            f"TTS [{output_device}]: {len(request.text)} chars -> {audio_duration_s:.2f}s audio | "
+            f"TTS [{model.device}]: {len(request.text)} chars -> {audio_duration_s:.2f}s audio | "
             f"gen={generation_ms:.0f}ms, encode={encode_ms:.0f}ms, total={total_ms:.0f}ms "
             f"({1/rtf:.1f}x RT)"
         )

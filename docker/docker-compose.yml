@@ -12,9 +12,11 @@
 #   docker-compose down               # Stop all services
 #
 # TTS Selection:
-#   - Chatterbox (port 5000): High quality, 1.5x realtime, GPU required
+#   - Chatterbox (port 5000): High quality, ~2-3x realtime on GPU, NVIDIA runtime required
 #   - Piper (port 5001): Good quality, 20-50x realtime, CPU only
 #   Set TTS_BASE_URL environment variable in C# server to switch.
+#
+# IMPORTANT: Chatterbox requires the NVIDIA Container Toolkit and runtime: nvidia
 #
 # Note: The C# server runs directly on the host, not in Docker.
 
@@ -28,12 +30,15 @@ services:
       context: ../tts-service
       dockerfile: Dockerfile
     container_name: edda-tts
+    runtime: nvidia  # Use NVIDIA runtime for GPU access
     ports:
       - "5000:5000"
     environment:
       - TTS_DEVICE=cuda
       - TTS_PORT=5000
       - LOG_LEVEL=INFO
+      - NVIDIA_VISIBLE_DEVICES=all  # Make GPU visible to container
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility  # Required for CUDA
     volumes:
       # Mount voice reference files (for voice cloning)
       - ../voices:/app/voices:ro
