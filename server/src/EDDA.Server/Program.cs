@@ -43,16 +43,24 @@ var whisper = app.Services.GetRequiredService<IWhisperService>();
 await whisper.InitializeAsync();
 
 // Initialize TTS service health monitoring
-app.Logger.LogInformation("Initializing TTS service connection...");
+app.Logger.LogInformation("Initializing TTS service ({Backend}) at {Url}...", 
+    ttsConfig.BackendName, ttsConfig.ActiveUrl);
 var tts = app.Services.GetRequiredService<ITtsService>();
 await tts.InitializeAsync();
 
-app.Logger.LogInformation("TTS service health: {Status}", tts.IsHealthy ? "OK" : "UNAVAILABLE");
+app.Logger.LogInformation("TTS service ({Backend}): {Status}", 
+    ttsConfig.BackendName, tts.IsHealthy ? "OK" : "UNAVAILABLE");
 if (!tts.IsHealthy)
 {
     app.Logger.LogWarning(
         "TTS service not available at startup. Ensure Docker containers are running: " +
-        "cd docker && docker-compose up -d");
+        "cd docker && docker compose up -d");
+    app.Logger.LogWarning(
+        "To switch TTS backend, set TTS_URL environment variable:");
+    app.Logger.LogWarning(
+        "  Chatterbox (quality): TTS_URL=http://localhost:5000");
+    app.Logger.LogWarning(
+        "  Piper (speed):        TTS_URL=http://localhost:5001");
 }
 
 // ============================================================================

@@ -18,6 +18,9 @@ Environment=WHISPER_MAX_AUDIO_SECONDS=60
 Environment=WHISPER_SILENCE_SECONDS=0.2
 Environment=WHISPER_THREADS=4
 
+# TTS Backend: Change DEFAULT_BACKEND in TtsConfig.cs
+# Piper on :5001, Chatterbox on :5000
+
 [Install]
 WantedBy=multi-user.target
 

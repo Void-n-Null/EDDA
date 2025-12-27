@@ -31,12 +31,63 @@
       "problemMatcher": []
     },
     {
+      "label": "[DOCKER] Deploy & Run",
+      "type": "shell",
+      "command": "./scripts/dev-docker.sh",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "focus": true,
+        "group": "edda-docker"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "[DOCKER] TTS Logs Only",
+      "type": "shell",
+      "command": "./scripts/logs-tts.sh",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "focus": true,
+        "group": "edda-docker"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "[DOCKER] Stop",
+      "type": "shell",
+      "command": "./scripts/docker-down.sh",
+      "presentation": {
+        "reveal": "always"
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "[BOTH] Deploy & Run",
       "dependsOn": [
         "[SERVER] Deploy & Run",
         "[PI] Deploy & Run"
       ],
       "dependsOrder": "parallel",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "group": "edda-dev"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "[ALL] Deploy & Run",
+      "dependsOn": [
+        "[DOCKER] Deploy & Run",
+        "[SERVER] Deploy & Run",
+        "[PI] Deploy & Run"
+      ],
+      "dependsOrder": "sequence",
       "group": "build",
       "presentation": {
         "reveal": "always",
