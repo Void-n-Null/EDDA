@@ -13,26 +13,32 @@ namespace EDDA.Server.Handlers;
 public class WebSocketHandler
 {
     private readonly IWhisperService _whisper;
+    private readonly ITtsService _tts;
     private readonly AudioConfig _config;
     private readonly ILogger<WebSocketHandler> _logger;
     private readonly byte[] _chimeAudio;
     
-    public WebSocketHandler(IWhisperService whisper, AudioConfig config, ILogger<WebSocketHandler> logger)
+    public WebSocketHandler(
+        IWhisperService whisper,
+        ITtsService tts,
+        AudioConfig config,
+        ILogger<WebSocketHandler> logger)
     {
         _whisper = whisper;
+        _tts = tts;
         _config = config;
         _logger = logger;
         
-        // Load the chime audio file (from bin/Debug|Release/net8.0/ go up 4 levels to project root)
+        // Load fallback chime audio (used if TTS unavailable)
         var chimePath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "electronic_chime.wav"));
         if (File.Exists(chimePath))
         {
             _chimeAudio = File.ReadAllBytes(chimePath);
-            _logger.LogInformation("Loaded chime audio: {Path} ({Bytes} bytes)", chimePath, _chimeAudio.Length);
+            _logger.LogInformation("Loaded fallback chime: {Path} ({Bytes} bytes)", chimePath, _chimeAudio.Length);
         }
         else
         {
-            _logger.LogWarning("Chime audio not found at {Path}", chimePath);
+            _logger.LogWarning("Fallback chime not found at {Path}", chimePath);
             _chimeAudio = [];
         }
     }
@@ -140,10 +146,10 @@ public class WebSocketHandler
                 var combinedQuery = string.Join(" ", queuedTranscriptions).Trim();
                 _logger.LogInformation("READY TO RESPOND: \"{Query}\"", combinedQuery);
                 
-                // Send chime to indicate we're about to respond
-                await SendAudioPlaybackAsync(webSocket);
-                
-                // TODO: Wire this into LLM response pipeline
+                // Generate and send TTS response
+                // TODO: Replace with actual LLM response
+                var responseText = "Hello World! It's me! Edda!";
+                await SendTtsResponseAsync(webSocket, responseText);
             }
         }
     }
@@ -247,18 +253,52 @@ public class WebSocketHandler
         }
     }
     
-    private async Task SendAudioPlaybackAsync(WebSocket webSocket)
+    /// <summary>
+    /// Generate speech using TTS and send to client.
+    /// Falls back to chime if TTS is unavailable.
+    /// </summary>
+    private async Task SendTtsResponseAsync(WebSocket webSocket, string text)
     {
-        if (_chimeAudio.Length == 0)
+        byte[] audioData;
+        
+        if (_tts.IsHealthy)
         {
-            _logger.LogWarning("No chime audio loaded, skipping playback");
+            try
+            {
+                _logger.LogInformation("Generating TTS for: \"{Text}\"", text);
+                audioData = await _tts.GenerateSpeechAsync(text, exaggeration: 0.6f);
+                _logger.LogInformation("TTS generated {Bytes} bytes", audioData.Length);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "TTS generation failed, falling back to chime");
+                audioData = _chimeAudio;
+            }
+        }
+        else
+        {
+            _logger.LogWarning("TTS unavailable, using fallback chime");
+            audioData = _chimeAudio;
+        }
+        
+        if (audioData.Length == 0)
+        {
+            _logger.LogWarning("No audio to send");
             return;
         }
         
+        await SendAudioToClientAsync(webSocket, audioData);
+    }
+    
+    /// <summary>
+    /// Send audio data to the WebSocket client.
+    /// </summary>
+    private async Task SendAudioToClientAsync(WebSocket webSocket, byte[] audioData)
+    {
         var message = new
         {
             type = "audio_playback",
-            data = Convert.ToBase64String(_chimeAudio),
+            data = Convert.ToBase64String(audioData),
             format = "wav"
         };
         
@@ -271,7 +311,7 @@ public class WebSocketHandler
             endOfMessage: true,
             CancellationToken.None);
         
-        _logger.LogInformation("Sent audio playback ({Bytes} bytes)", _chimeAudio.Length);
+        _logger.LogInformation("Sent audio ({Bytes} bytes)", audioData.Length);
     }
 }
 

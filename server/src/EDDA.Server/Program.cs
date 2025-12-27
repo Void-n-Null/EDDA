@@ -4,21 +4,64 @@ using EDDA.Server.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// ============================================================================
 // Configuration
+// ============================================================================
+
 var audioConfig = AudioConfig.FromEnvironment();
+var ttsConfig = TtsConfig.FromEnvironment();
+
 builder.Services.AddSingleton(audioConfig);
+builder.Services.AddSingleton(ttsConfig);
+
+// ============================================================================
 // Services
+// ============================================================================
+
+// Speech-to-text (Whisper)
 builder.Services.AddSingleton<IWhisperService, WhisperService>();
+
+// Text-to-speech (Chatterbox via microservice)
+builder.Services.AddSingleton<ITtsService, TtsService>();
+
+// WebSocket handler
 builder.Services.AddTransient<WebSocketHandler>();
 
 var app = builder.Build();
 
-// Initialize Whisper at startup
+// ============================================================================
+// Service Initialization
+// ============================================================================
+
+app.Logger.LogInformation("=" + new string('=', 59));
+app.Logger.LogInformation("EDDA Server Starting");
+app.Logger.LogInformation("=" + new string('=', 59));
+
+// Initialize Whisper (STT)
+app.Logger.LogInformation("Initializing Whisper STT...");
 var whisper = app.Services.GetRequiredService<IWhisperService>();
 await whisper.InitializeAsync();
 
+// Initialize TTS service health monitoring
+app.Logger.LogInformation("Initializing TTS service connection...");
+var tts = app.Services.GetRequiredService<ITtsService>();
+await tts.InitializeAsync();
+
+app.Logger.LogInformation("TTS service health: {Status}", tts.IsHealthy ? "OK" : "UNAVAILABLE");
+if (!tts.IsHealthy)
+{
+    app.Logger.LogWarning(
+        "TTS service not available at startup. Ensure Docker containers are running: " +
+        "cd docker && docker-compose up -d");
+}
+
+// ============================================================================
+// Endpoints
+// ============================================================================
+
 app.UseWebSockets();
 
+// WebSocket endpoint for voice communication
 app.Map("/ws", async context =>
 {
     if (context.WebSockets.IsWebSocketRequest)
@@ -33,5 +76,13 @@ app.Map("/ws", async context =>
     }
 });
 
-app.Logger.LogInformation("EDDA Server starting...");
+// Health check endpoint
+app.MapGet("/health", (IWhisperService whisper, ITtsService tts) => new
+{
+    status = whisper.IsInitialized && tts.IsHealthy ? "healthy" : "degraded",
+    whisper = new { ready = whisper.IsInitialized },
+    tts = new { ready = tts.IsHealthy, status = tts.LastHealthStatus },
+});
+
+app.Logger.LogInformation("EDDA Server ready on http://0.0.0.0:8080");
 app.Run("http://0.0.0.0:8080");
