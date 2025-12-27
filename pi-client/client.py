@@ -198,9 +198,13 @@ async def receive_messages(websocket, p, output_device_index, playback_event):
                 msg_type = data.get("type")
                 
                 if msg_type == "audio_playback":
-                    print("[RECV] Audio playback message received")
+                    # Get chunk info if available (for streaming TTS)
+                    chunk = data.get("chunk", 1)
+                    total = data.get("total_chunks", 1)
+                    print(f"[RECV] Audio chunk {chunk}/{total}")
                     
                     # Signal that we're playing audio (pauses mic capture)
+                    # This stays set until response_complete
                     playback_event.set()
                     
                     # Decode and play the audio
@@ -214,10 +218,12 @@ async def receive_messages(websocket, p, output_device_index, playback_event):
                         play_wav_audio,
                         p, audio_data, output_device_index
                     )
+                    # Don't clear playback_event here - wait for response_complete
                     
-                    # Resume mic capture
+                elif msg_type == "response_complete":
+                    # Server finished sending all audio chunks
+                    print("[RECV] Response complete - resuming mic capture")
                     playback_event.clear()
-                    print("Resuming mic capture...")
                     
             except json.JSONDecodeError:
                 print(f"[WARN] Received non-JSON message: {message[:100]}")

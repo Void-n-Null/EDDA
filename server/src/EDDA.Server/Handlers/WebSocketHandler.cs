@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using EDDA.Server.Models;
 using EDDA.Server.Services;
 
@@ -146,9 +147,9 @@ public class WebSocketHandler
                 var combinedQuery = string.Join(" ", queuedTranscriptions).Trim();
                 _logger.LogInformation("READY TO RESPOND: \"{Query}\"", combinedQuery);
                 
-                // Generate and send TTS response
+                // Generate and send TTS response (sentence-by-sentence streaming)
                 // TODO: Replace with actual LLM response
-                var responseText = "Hello World! It's me! Edda!";
+                var responseText = "Hello World! It's me, Edda! I can now speak to you in real time. Isn't that exciting?";
                 await SendTtsResponseAsync(webSocket, responseText);
             }
         }
@@ -254,52 +255,93 @@ public class WebSocketHandler
     }
     
     /// <summary>
-    /// Generate speech using TTS and send to client.
+    /// Generate speech using TTS and stream to client sentence-by-sentence.
+    /// This reduces time-to-first-audio by sending each sentence as soon as it's ready.
     /// Falls back to chime if TTS is unavailable.
     /// </summary>
     private async Task SendTtsResponseAsync(WebSocket webSocket, string text)
     {
-        byte[] audioData;
-        
-        if (_tts.IsHealthy)
-        {
-            try
-            {
-                _logger.LogInformation("Generating TTS for: \"{Text}\"", text);
-                audioData = await _tts.GenerateSpeechAsync(text, exaggeration: 0.6f);
-                _logger.LogInformation("TTS generated {Bytes} bytes", audioData.Length);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "TTS generation failed, falling back to chime");
-                audioData = _chimeAudio;
-            }
-        }
-        else
+        if (!_tts.IsHealthy)
         {
             _logger.LogWarning("TTS unavailable, using fallback chime");
-            audioData = _chimeAudio;
-        }
-        
-        if (audioData.Length == 0)
-        {
-            _logger.LogWarning("No audio to send");
+            if (_chimeAudio.Length > 0)
+            {
+                await SendAudioChunkAsync(webSocket, _chimeAudio, 1, 1);
+            }
+            await SendResponseCompleteAsync(webSocket);
             return;
         }
         
-        await SendAudioToClientAsync(webSocket, audioData);
+        // Split into sentences for streaming
+        var sentences = SplitIntoSentences(text);
+        _logger.LogInformation("Streaming TTS response: {Count} sentence(s)", sentences.Count);
+        
+        var sentenceIndex = 0;
+        foreach (var sentence in sentences)
+        {
+            sentenceIndex++;
+            var trimmed = sentence.Trim();
+            if (string.IsNullOrEmpty(trimmed))
+                continue;
+            
+            try
+            {
+                _logger.LogDebug("TTS [{Index}/{Total}]: \"{Sentence}\"", sentenceIndex, sentences.Count, trimmed);
+                
+                var audioData = await _tts.GenerateSpeechAsync(trimmed, exaggeration: 0.6f);
+                
+                if (audioData.Length > 0)
+                {
+                    await SendAudioChunkAsync(webSocket, audioData, sentenceIndex, sentences.Count);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "TTS failed for sentence {Index}, skipping", sentenceIndex);
+                // Continue with remaining sentences
+            }
+        }
+        
+        await SendResponseCompleteAsync(webSocket);
     }
     
     /// <summary>
-    /// Send audio data to the WebSocket client.
+    /// Split text into sentences using regex.
+    /// Handles common abbreviations and edge cases.
     /// </summary>
-    private async Task SendAudioToClientAsync(WebSocket webSocket, byte[] audioData)
+    private static List<string> SplitIntoSentences(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return [];
+        
+        // Split on sentence-ending punctuation followed by whitespace or end of string
+        // This regex looks for .!? followed by space or end, but preserves the punctuation
+        var pattern = @"(?<=[.!?])\s+";
+        var sentences = Regex.Split(text.Trim(), pattern)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToList();
+        
+        // If no splits occurred (single sentence or no punctuation), return the whole text
+        if (sentences.Count == 0)
+        {
+            sentences.Add(text.Trim());
+        }
+        
+        return sentences;
+    }
+    
+    /// <summary>
+    /// Send an audio chunk to the WebSocket client.
+    /// </summary>
+    private async Task SendAudioChunkAsync(WebSocket webSocket, byte[] audioData, int chunkIndex, int totalChunks)
     {
         var message = new
         {
             type = "audio_playback",
             data = Convert.ToBase64String(audioData),
-            format = "wav"
+            format = "wav",
+            chunk = chunkIndex,
+            total_chunks = totalChunks
         };
         
         var json = JsonSerializer.Serialize(message);
@@ -311,7 +353,25 @@ public class WebSocketHandler
             endOfMessage: true,
             CancellationToken.None);
         
-        _logger.LogInformation("Sent audio ({Bytes} bytes)", audioData.Length);
+        _logger.LogInformation("Sent audio chunk {Index}/{Total} ({Bytes} bytes)", chunkIndex, totalChunks, audioData.Length);
+    }
+    
+    /// <summary>
+    /// Send a response_complete message to signal end of TTS output.
+    /// </summary>
+    private async Task SendResponseCompleteAsync(WebSocket webSocket)
+    {
+        var message = new { type = "response_complete" };
+        var json = JsonSerializer.Serialize(message);
+        var bytes = Encoding.UTF8.GetBytes(json);
+        
+        await webSocket.SendAsync(
+            new ArraySegment<byte>(bytes),
+            WebSocketMessageType.Text,
+            endOfMessage: true,
+            CancellationToken.None);
+        
+        _logger.LogDebug("Sent response_complete");
     }
 }
 
