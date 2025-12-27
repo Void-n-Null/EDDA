@@ -3,7 +3,6 @@ set -e
 
 SERVER_HOST="basement"
 SERVER_DIR="/home/blake/edda-server"
-WHISPER_MODEL_PATH_REMOTE=/home/blake/edda-server/models/ggml-small.en-q8_0.bin
 
 echo "Deploying EDDA server..."
 
@@ -19,24 +18,16 @@ rsync -avz --delete \
 echo "Building..."
 ssh $SERVER_HOST "cd $SERVER_DIR && dotnet build EDDA.sln --configuration Release" 2>&1 | grep -v "WARNING: connection"
 
-# Kill old process
-echo "Stopping old process..."
-ssh $SERVER_HOST "pkill -f 'dotnet.*EDDA.Server' || true; pkill -f 'EDDA\\.Server' || true" 2>&1 | grep -v "WARNING: connection"
+# Fix SELinux context (Fedora requires bin_t for systemd to execute)
+echo "Fixing SELinux context..."
+ssh $SERVER_HOST "chcon -t bin_t $SERVER_DIR/EDDA.Server/bin/Release/net8.0/EDDA.Server" 2>&1 | grep -v "WARNING: connection"
 
-# Clear old log
-ssh $SERVER_HOST "rm -f /tmp/edda.log" 2>&1 | grep -v "WARNING: connection"
+# Restart via systemd (may fail if sudo needs password - that's OK, just restart manually)
+echo "Restarting edda-server service..."
+ssh $SERVER_HOST "sudo systemctl restart edda-server 2>/dev/null || echo '[WARN] Could not restart via systemd - run: ssh basement sudo systemctl restart edda-server'" 2>&1 | grep -v "WARNING: connection"
 
-# Start and immediately tail logs
-echo "Starting server and streaming logs..."
+# Tail logs
 echo "------------------------------------------------"
+echo "Streaming logs (Ctrl+C to stop)..."
 echo ""
-
-# Run with CUDA GPU acceleration. Keep current dir on the loader path for native whisper libs.
-ssh -t $SERVER_HOST "bash -l -c 'cd $SERVER_DIR/EDDA.Server/bin/Release/net8.0 && \
-export PATH=/usr/local/cuda/bin:\$PATH && \
-export LD_LIBRARY_PATH=.:/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:\$LD_LIBRARY_PATH && \
-export WHISPER_MODEL_PATH=$WHISPER_MODEL_PATH_REMOTE && \
-export WHISPER_MAX_AUDIO_SECONDS=60 && \
-export WHISPER_SILENCE_SECONDS=1.5 && \
-export WHISPER_THREADS=4 && \
-./EDDA.Server'"
+ssh $SERVER_HOST "journalctl -u edda-server -f --no-hostname -o cat"

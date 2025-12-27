@@ -21,6 +21,9 @@ rsync -avz --delete \
 echo "Building on server..."
 ssh $SERVER_HOST "cd $SERVER_DIR && dotnet build EDDA.sln --configuration Release"
 
+echo "Fixing SELinux context..."
+ssh $SERVER_HOST "chcon -t bin_t $SERVER_DIR/EDDA.Server/bin/Release/net8.0/EDDA.Server"
+
 echo "Deployment complete!"
 echo ""
 echo "To run on server:"

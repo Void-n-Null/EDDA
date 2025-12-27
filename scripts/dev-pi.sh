@@ -27,18 +27,16 @@ rsync -avz --delete \
   --exclude '*.pyc' \
   pi-client/ $PI_HOST:$PI_DIR/
 
-# THEN install requirements (use --force-reinstall for numpy if needed)
+# THEN install requirements
 echo "--- Installing Python dependencies..."
 ssh $PI_HOST "cd $PI_DIR && ./venv/bin/pip install --upgrade -r requirements.txt"
 
-# Kill old process using different method
-echo "--- Stopping old process..."
-ssh $PI_HOST 'killall python3 2>/dev/null || true'
-# Much simpler ^^^^^^
+# Restart via systemd
+echo "--- Restarting edda-client service..."
+ssh $PI_HOST "sudo systemctl restart edda-client"
 
-# Start with unbuffered output
-echo "--- Starting client and streaming logs..."
+# Tail logs
 echo "------------------------------------------------"
+echo "Streaming logs (Ctrl+C to stop)..."
 echo ""
-
-ssh $PI_HOST "cd $PI_DIR && ./venv/bin/python3 -u client.py"
+ssh $PI_HOST "journalctl -u edda-client -f --no-hostname -o cat"

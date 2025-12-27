@@ -1,0 +1,23 @@
+[Unit]
+Description=EDDA Server
+After=network.target
+
+[Service]
+Type=simple
+User=blake
+WorkingDirectory=/home/blake/edda-server/EDDA.Server/bin/Release/net8.0
+ExecStart=/home/blake/edda-server/EDDA.Server/bin/Release/net8.0/EDDA.Server
+Restart=always
+RestartSec=3
+
+# Environment for CUDA and Whisper
+Environment=PATH=/usr/local/cuda/bin:/usr/bin:/bin
+Environment=LD_LIBRARY_PATH=/home/blake/edda-server/EDDA.Server/bin/Release/net8.0:/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib
+Environment=WHISPER_MODEL_PATH=/home/blake/edda-server/models/ggml-small.en-q8_0.bin
+Environment=WHISPER_MAX_AUDIO_SECONDS=60
+Environment=WHISPER_SILENCE_SECONDS=0.2
+Environment=WHISPER_THREADS=4
+
+[Install]
+WantedBy=multi-user.target
+
