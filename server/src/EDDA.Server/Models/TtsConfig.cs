@@ -20,7 +20,7 @@ public class TtsConfig
     // ====================================================================
     // CHANGE THIS TO SWITCH TTS BACKENDS
     // ====================================================================
-    public const TtsBackend DEFAULT_BACKEND = TtsBackend.Piper;
+    public const TtsBackend DEFAULT_BACKEND = TtsBackend.Chatterbox;
     // ====================================================================
     
     public string ChatterboxUrl { get; init; } = "http://localhost:5000";
