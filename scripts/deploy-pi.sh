@@ -11,6 +11,10 @@ rsync -avz --delete \
   --exclude 'venv/' \
   --exclude '__pycache__/' \
   --exclude '*.pyc' \
+  --exclude '*.pyo' \
+  --exclude '*.egg-info/' \
+  --exclude '.pytest_cache/' \
+  --exclude '*.log' \
   --exclude '.git/' \
   pi-client/ $PI_HOST:$PI_DIR/
 
