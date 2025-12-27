@@ -1,0 +1,17 @@
+# Voice reference audio files for voice cloning
+# 
+# Place WAV files here for use with Chatterbox voice cloning.
+# These files are mounted into the TTS Docker container at /app/voices/
+#
+# Example usage in TTS request:
+#   {
+#     "text": "Hello world",
+#     "voice_reference": "/app/voices/my-voice.wav"
+#   }
+#
+# Requirements:
+#   - WAV format
+#   - 5-30 seconds of clean speech
+#   - Single speaker
+#   - Minimal background noise
+
