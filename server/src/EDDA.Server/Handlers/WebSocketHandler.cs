@@ -145,11 +145,11 @@ public class WebSocketHandler
             if (queuedTranscriptions is { Count: > 0 })
             {
                 var combinedQuery = string.Join(" ", queuedTranscriptions).Trim();
-                _logger.LogInformation("READY TO RESPOND: \"{Query}\"", combinedQuery);
+                _logger.LogInformation("HEARD: \"{Query}\"", combinedQuery);
                 
-                // Generate and send TTS response (sentence-by-sentence streaming)
+                // Echo mode: Repeat what the user said (tests full STT -> TTS pipeline)
                 // TODO: Replace with actual LLM response
-                var responseText = "Hello World! It's me, Edda! I can now speak to you in real time. Isn't that exciting?";
+                var responseText = $"You said: {combinedQuery}";
                 await SendTtsResponseAsync(webSocket, responseText);
             }
         }
