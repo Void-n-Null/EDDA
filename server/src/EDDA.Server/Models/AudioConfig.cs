@@ -7,7 +7,7 @@ public record AudioConfig
 {
     public int SampleRate { get; init; } = 16000;
     public int WhisperThreads { get; init; } = Environment.ProcessorCount;
-    public double WaitingForMoreTimeoutMs { get; init; } = 800;
+    public double WaitingForMoreTimeoutMs { get; init; } = 200;
     public string? ModelPath { get; init; }
     
     /// <summary>Bytes per second for 16-bit mono PCM at configured sample rate.</summary>
@@ -22,7 +22,7 @@ public record AudioConfig
         {
             SampleRate = ParseIntEnv("WHISPER_SAMPLE_RATE", 16000),
             WhisperThreads = ParseIntEnv("WHISPER_THREADS", Math.Max(1, Environment.ProcessorCount)),
-            WaitingForMoreTimeoutMs = ParseDoubleEnv("WHISPER_WAITING_TIMEOUT_MS", 800),
+            WaitingForMoreTimeoutMs = ParseDoubleEnv("WHISPER_WAITING_TIMEOUT_MS", 200),
             ModelPath = Environment.GetEnvironmentVariable("WHISPER_MODEL_PATH")
         };
     }

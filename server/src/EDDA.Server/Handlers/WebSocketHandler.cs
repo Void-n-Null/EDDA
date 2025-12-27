@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -58,13 +59,17 @@ public class WebSocketHandler
         var transcriptionQueue = new List<string>();
         var stateLock = new object();
         
+        // Track when end_speech was received for complete TTFA measurement
+        Stopwatch? endSpeechTimer = null;
+        
         // Background task to check for "waiting for more" timeout
         var stateCheckTask = RunStateCheckerAsync(
             webSocket, cts.Token, stateLock,
             () => state,
             s => state = s,
             () => lastSpeechEndTime,
-            transcriptionQueue);
+            transcriptionQueue,
+            () => endSpeechTimer);
         
         try
         {
@@ -79,7 +84,8 @@ public class WebSocketHandler
                         () => state,
                         s => state = s,
                         t => lastSpeechEndTime = t,
-                        transcriptionQueue);
+                        transcriptionQueue,
+                        sw => endSpeechTimer = sw);
                 }
                 else if (result.MessageType == WebSocketMessageType.Close)
                 {
@@ -110,7 +116,8 @@ public class WebSocketHandler
         Func<ConnectionState> getState,
         Action<ConnectionState> setState,
         Func<DateTime> getLastSpeechEnd,
-        List<string> transcriptionQueue)
+        List<string> transcriptionQueue,
+        Func<Stopwatch?> getEndSpeechTimer)
     {
         while (!ct.IsCancellationRequested && webSocket.State == WebSocketState.Open)
         {
@@ -124,6 +131,8 @@ public class WebSocketHandler
             }
             
             List<string>? queuedTranscriptions = null;
+            long waitTimeMs = 0;
+            Stopwatch? pipelineTimer = null;
             
             lock (stateLock)
             {
@@ -136,6 +145,8 @@ public class WebSocketHandler
                         queuedTranscriptions = [.. transcriptionQueue];
                         transcriptionQueue.Clear();
                         setState(ConnectionState.Idle);
+                        waitTimeMs = (long)timeSinceLastSpeech;
+                        pipelineTimer = getEndSpeechTimer();
                         
                         _logger.LogDebug("STATE: WaitingForMore -> Idle (timeout, {Count} transcriptions)", queuedTranscriptions.Count);
                     }
@@ -147,10 +158,19 @@ public class WebSocketHandler
                 var combinedQuery = string.Join(" ", queuedTranscriptions).Trim();
                 _logger.LogInformation("HEARD: \"{Query}\"", combinedQuery);
                 
+                // Log time elapsed since end_speech was received (includes STT + wait)
+                var sttAndWaitMs = pipelineTimer?.ElapsedMilliseconds ?? 0;
+                
                 // Echo mode: Repeat what the user said (tests full STT -> TTS pipeline)
                 // TODO: Replace with actual LLM response
+                var llmStart = pipelineTimer?.ElapsedMilliseconds ?? 0;
                 var responseText = $"You said: {combinedQuery}";
-                await SendTtsResponseAsync(webSocket, responseText);
+                var llmMs = (pipelineTimer?.ElapsedMilliseconds ?? 0) - llmStart;
+                
+                _logger.LogInformation("⏱️ Pipeline | STT+Wait: {SttWaitMs}ms | LLM: {LlmMs}ms (echo mode) | Starting TTS...",
+                    sttAndWaitMs, llmMs);
+                
+                await SendTtsResponseAsync(webSocket, responseText, pipelineTimer);
             }
         }
     }
@@ -163,7 +183,8 @@ public class WebSocketHandler
         Func<ConnectionState> getState,
         Action<ConnectionState> setState,
         Action<DateTime> setLastSpeechEnd,
-        List<string> transcriptionQueue)
+        List<string> transcriptionQueue,
+        Action<Stopwatch> setEndSpeechTimer)
     {
         var json = Encoding.UTF8.GetString(buffer, 0, count);
         
@@ -181,7 +202,7 @@ public class WebSocketHandler
         }
         else if (messageType == "end_speech")
         {
-            await HandleEndSpeechAsync(audioStream, stateLock, setState, setLastSpeechEnd, transcriptionQueue);
+            await HandleEndSpeechAsync(audioStream, stateLock, setState, setLastSpeechEnd, transcriptionQueue, setEndSpeechTimer);
         }
     }
     
@@ -215,18 +236,34 @@ public class WebSocketHandler
         object stateLock,
         Action<ConnectionState> setState,
         Action<DateTime> setLastSpeechEnd,
-        List<string> transcriptionQueue)
+        List<string> transcriptionQueue,
+        Action<Stopwatch> setEndSpeechTimer)
     {
         if (audioStream.Length == 0)
             return;
+        
+        // Start the pipeline timer - this is when user finished speaking (from server's perspective)
+        var pipelineTimer = Stopwatch.StartNew();
+        setEndSpeechTimer(pipelineTimer);
         
         _logger.LogDebug("Received end_speech signal");
         
         var audioData = audioStream.ToArray();
         audioStream.SetLength(0);
         
-        _logger.LogInformation("Processing {Bytes} bytes with Whisper...", audioData.Length);
+        var audioBytes = audioData.Length;
+        var audioSeconds = audioBytes / (double)_config.BytesPerSecond;
+        
+        _logger.LogInformation("⏱️ STT Start | {Bytes} bytes ({AudioSec:F2}s audio)", audioBytes, audioSeconds);
+        var sttStart = pipelineTimer.ElapsedMilliseconds;
         var transcription = await _whisper.TranscribeAsync(audioData);
+        var sttMs = pipelineTimer.ElapsedMilliseconds - sttStart;
+        
+        _logger.LogInformation("⏱️ STT Done | {Ms}ms for {AudioSec:F2}s audio ({Rtf:F1}x realtime) -> \"{Text}\"",
+            sttMs,
+            audioSeconds,
+            audioSeconds > 0 ? audioSeconds * 1000.0 / sttMs : 0,
+            transcription.Length > 50 ? transcription[..50] + "..." : transcription);
         
         lock (stateLock)
         {
@@ -259,7 +296,7 @@ public class WebSocketHandler
     /// This reduces time-to-first-audio by sending each sentence as soon as it's ready.
     /// Falls back to chime if TTS is unavailable.
     /// </summary>
-    private async Task SendTtsResponseAsync(WebSocket webSocket, string text)
+    private async Task SendTtsResponseAsync(WebSocket webSocket, string text, Stopwatch? ttfaTimer = null)
     {
         if (!_tts.IsHealthy)
         {
@@ -267,6 +304,10 @@ public class WebSocketHandler
             if (_chimeAudio.Length > 0)
             {
                 await SendAudioChunkAsync(webSocket, _chimeAudio, 1, 1);
+                if (ttfaTimer != null)
+                {
+                    _logger.LogInformation("⏱️ TTFA Complete (fallback) | Total: {Ms}ms", ttfaTimer.ElapsedMilliseconds);
+                }
             }
             await SendResponseCompleteAsync(webSocket);
             return;
@@ -277,6 +318,9 @@ public class WebSocketHandler
         _logger.LogInformation("Streaming TTS response: {Count} sentence(s)", sentences.Count);
         
         var sentenceIndex = 0;
+        var firstChunkSent = false;
+        long ttsStartMs = ttfaTimer?.ElapsedMilliseconds ?? 0;
+        
         foreach (var sentence in sentences)
         {
             sentenceIndex++;
@@ -286,13 +330,34 @@ public class WebSocketHandler
             
             try
             {
+                var ttsChunkStart = ttfaTimer?.ElapsedMilliseconds ?? 0;
                 _logger.LogDebug("TTS [{Index}/{Total}]: \"{Sentence}\"", sentenceIndex, sentences.Count, trimmed);
                 
                 var audioData = await _tts.GenerateSpeechAsync(trimmed, exaggeration: 0.6f);
+                var ttsChunkMs = (ttfaTimer?.ElapsedMilliseconds ?? 0) - ttsChunkStart;
                 
                 if (audioData.Length > 0)
                 {
+                    var sendStart = ttfaTimer?.ElapsedMilliseconds ?? 0;
                     await SendAudioChunkAsync(webSocket, audioData, sentenceIndex, sentences.Count);
+                    var sendMs = (ttfaTimer?.ElapsedMilliseconds ?? 0) - sendStart;
+                    
+                    if (!firstChunkSent && ttfaTimer != null)
+                    {
+                        firstChunkSent = true;
+                        var totalTtfa = ttfaTimer.ElapsedMilliseconds;
+                        var ttsMs = ttsChunkMs;
+                        
+                        _logger.LogInformation(
+                            "⏱️ TTFA Complete | Total: {TotalMs}ms | Breakdown: TTS={TtsMs}ms, WS Send={SendMs}ms",
+                            totalTtfa, ttsMs, sendMs);
+                        
+                        // Also log audio duration info
+                        var audioDurationMs = EstimateWavDurationMs(audioData);
+                        _logger.LogInformation(
+                            "⏱️ First chunk: {Bytes} bytes (~{AudioMs}ms audio), sent in {SendMs}ms",
+                            audioData.Length, audioDurationMs, sendMs);
+                    }
                 }
             }
             catch (Exception ex)
@@ -303,6 +368,34 @@ public class WebSocketHandler
         }
         
         await SendResponseCompleteAsync(webSocket);
+        
+        if (ttfaTimer != null)
+        {
+            _logger.LogInformation("⏱️ Full Response | Total time: {Ms}ms for {Count} chunks",
+                ttfaTimer.ElapsedMilliseconds, sentenceIndex);
+        }
+    }
+    
+    /// <summary>
+    /// Estimate WAV audio duration from byte array.
+    /// Assumes standard WAV header and PCM format.
+    /// </summary>
+    private static int EstimateWavDurationMs(byte[] wavData)
+    {
+        if (wavData.Length < 44) return 0; // Too short for WAV header
+        
+        try
+        {
+            // WAV header: bytes 24-27 = sample rate, bytes 34-35 = bits per sample
+            // For simplicity, assume 24kHz 16-bit mono (common TTS output)
+            var dataSize = wavData.Length - 44; // Subtract header
+            var bytesPerSecond = 24000 * 2; // 24kHz * 16-bit = 48000 bytes/sec
+            return (int)(dataSize * 1000.0 / bytesPerSecond);
+        }
+        catch
+        {
+            return 0;
+        }
     }
     
     /// <summary>

@@ -189,7 +189,7 @@ def play_wav_audio(p, audio_data: bytes, output_device_index: int):
         traceback.print_exc()
 
 
-async def receive_messages(websocket, p, output_device_index, playback_event):
+async def receive_messages(websocket, p, output_device_index, playback_event, timing_state):
     """Listen for incoming messages from the server."""
     try:
         async for message in websocket:
@@ -201,6 +201,13 @@ async def receive_messages(websocket, p, output_device_index, playback_event):
                     # Get chunk info if available (for streaming TTS)
                     chunk = data.get("chunk", 1)
                     total = data.get("total_chunks", 1)
+                    
+                    # Calculate time-to-first-audio on first chunk
+                    if chunk == 1 and timing_state.get("speech_end_time"):
+                        ttfa = (datetime.now() - timing_state["speech_end_time"]).total_seconds() * 1000
+                        print(f"\n⚡ TIME TO FIRST AUDIO: {ttfa:.0f}ms")
+                        timing_state["speech_end_time"] = None  # Reset
+                    
                     print(f"[RECV] Audio chunk {chunk}/{total}")
                     
                     # Signal that we're playing audio (pauses mic capture)
@@ -235,7 +242,7 @@ async def receive_messages(websocket, p, output_device_index, playback_event):
         raise  # Let the outer handler deal with reconnection
 
 
-async def capture_and_send(websocket, stream, playback_event):
+async def capture_and_send(websocket, stream, playback_event, timing_state):
     """Capture audio from mic and send to server with VAD filtering."""
     print("Listening for speech...")
     last_audio_time = datetime.now()
@@ -305,6 +312,9 @@ async def capture_and_send(websocket, stream, playback_event):
                         "timestamp": datetime.now().isoformat()
                     }
                     await websocket.send(json.dumps(end_message))
+                    
+                    # Record when speech ended for time-to-first-audio calculation
+                    timing_state["speech_end_time"] = datetime.now()
                 else:
                     chunks_sent += 1
                     encoded_data = base64.b64encode(resampled_data).decode('utf-8')
@@ -363,12 +373,15 @@ async def connect_and_stream(p, input_device_index, output_device_index):
                 # Event to signal when audio playback is in progress
                 playback_event = asyncio.Event()
                 
+                # Shared timing state for time-to-first-audio measurement
+                timing_state = {"speech_end_time": None}
+                
                 # Run capture and receive concurrently
                 capture_task = asyncio.create_task(
-                    capture_and_send(websocket, stream, playback_event)
+                    capture_and_send(websocket, stream, playback_event, timing_state)
                 )
                 receive_task = asyncio.create_task(
-                    receive_messages(websocket, p, output_device_index, playback_event)
+                    receive_messages(websocket, p, output_device_index, playback_event, timing_state)
                 )
                 
                 # Wait for either task to complete (likely due to error/disconnect)

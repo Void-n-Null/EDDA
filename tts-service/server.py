@@ -42,6 +42,9 @@ class Config:
     PORT: int = int(os.getenv("TTS_PORT", "5000"))
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     
+    # Performance options
+    USE_TORCH_COMPILE: bool = os.getenv("TTS_TORCH_COMPILE", "false").lower() == "true"
+    
     # Audio settings
     SAMPLE_RATE: int = 24000  # Chatterbox native sample rate
     
@@ -88,6 +91,25 @@ class TTSModel:
             self.load_time_ms = (time.perf_counter() - start) * 1000
             logger.info(f"Model loaded in {self.load_time_ms:.0f}ms")
             
+            # Verify model is actually on the expected device
+            self._verify_device()
+            
+            # Optional: torch.compile for faster inference (experimental)
+            if Config.USE_TORCH_COMPILE:
+                logger.info("Compiling model with torch.compile() - this may take a minute...")
+                try:
+                    # Compile the internal models if accessible
+                    # Note: This is experimental and may not work with all model architectures
+                    compile_start = time.perf_counter()
+                    if hasattr(self.model, 't2s') and self.model.t2s is not None:
+                        self.model.t2s = torch.compile(self.model.t2s, mode="reduce-overhead")
+                    if hasattr(self.model, 's2a') and self.model.s2a is not None:
+                        self.model.s2a = torch.compile(self.model.s2a, mode="reduce-overhead")
+                    compile_ms = (time.perf_counter() - compile_start) * 1000
+                    logger.info(f"Model compiled in {compile_ms:.0f}ms")
+                except Exception as e:
+                    logger.warning(f"torch.compile failed (non-fatal): {e}")
+            
             # Warmup inference (first inference is always slower)
             self._warmup()
             
@@ -100,15 +122,59 @@ class TTSModel:
             logger.error(f"Failed to load model: {e}")
             return False
     
+    def _verify_device(self):
+        """Verify the model components are on the expected device."""
+        try:
+            # Check various model components to verify device placement
+            devices_found = set()
+            
+            # Check t2s (text-to-semantic) model
+            if hasattr(self.model, 't2s') and self.model.t2s is not None:
+                for param in self.model.t2s.parameters():
+                    devices_found.add(str(param.device))
+                    break  # Just check first param
+            
+            # Check s2a (semantic-to-acoustic) model  
+            if hasattr(self.model, 's2a') and self.model.s2a is not None:
+                for param in self.model.s2a.parameters():
+                    devices_found.add(str(param.device))
+                    break
+            
+            # Check ve (voice encoder) if present
+            if hasattr(self.model, 've') and self.model.ve is not None:
+                for param in self.model.ve.parameters():
+                    devices_found.add(str(param.device))
+                    break
+            
+            if devices_found:
+                logger.info(f"Model components on device(s): {devices_found}")
+                if self.device == "cuda" and not any("cuda" in d for d in devices_found):
+                    logger.error("⚠️ WARNING: Model requested CUDA but components are on CPU!")
+                elif self.device == "cuda":
+                    logger.info("✓ Model confirmed on CUDA")
+            else:
+                logger.warning("Could not verify model device placement")
+                
+        except Exception as e:
+            logger.warning(f"Device verification failed: {e}")
+    
     def _warmup(self):
-        """Run a warmup inference to prime CUDA kernels."""
+        """Run warmup inferences to prime CUDA kernels."""
         logger.info("Running warmup inference...")
-        start = time.perf_counter()
         
         try:
-            _ = self.model.generate(Config.WARMUP_TEXT)
-            warmup_ms = (time.perf_counter() - start) * 1000
-            logger.info(f"Warmup complete in {warmup_ms:.0f}ms")
+            # First warmup - CUDA kernel compilation
+            with torch.inference_mode():
+                start = time.perf_counter()
+                _ = self.model.generate(Config.WARMUP_TEXT)
+                warmup1_ms = (time.perf_counter() - start) * 1000
+                logger.info(f"Warmup 1 complete in {warmup1_ms:.0f}ms")
+                
+                # Second warmup - should be faster, represents actual perf
+                start = time.perf_counter()
+                _ = self.model.generate(Config.WARMUP_TEXT)
+                warmup2_ms = (time.perf_counter() - start) * 1000
+                logger.info(f"Warmup 2 complete in {warmup2_ms:.0f}ms (this is expected perf)")
         except Exception as e:
             logger.warning(f"Warmup failed (non-fatal): {e}")
     
@@ -134,12 +200,14 @@ class TTSModel:
         if not self.is_ready or self.model is None:
             raise RuntimeError("Model not loaded")
         
-        return self.model.generate(
-            text,
-            audio_prompt_path=audio_prompt_path,
-            exaggeration=exaggeration,
-            cfg_weight=cfg_weight,
-        )
+        # Use inference_mode for faster execution (no gradient tracking)
+        with torch.inference_mode():
+            return self.model.generate(
+                text,
+                audio_prompt_path=audio_prompt_path,
+                exaggeration=exaggeration,
+                cfg_weight=cfg_weight,
+            )
     
     @property
     def sample_rate(self) -> int:
@@ -277,26 +345,30 @@ async def text_to_speech(request: TTSRequest):
         )
     
     try:
-        start = time.perf_counter()
+        total_start = time.perf_counter()
         
         # Generate audio
+        gen_start = time.perf_counter()
         audio = model.generate(
             text=request.text,
             audio_prompt_path=request.voice_reference,
             exaggeration=request.exaggeration,
             cfg_weight=request.cfg_weight,
         )
+        generation_ms = (time.perf_counter() - gen_start) * 1000
         
-        generation_ms = (time.perf_counter() - start) * 1000
+        # Log the device the output came from (sanity check)
+        output_device = str(audio.device) if hasattr(audio, 'device') else 'unknown'
         
         # Convert to WAV bytes
+        encode_start = time.perf_counter()
         wav_buffer = io.BytesIO()
         
         # Ensure audio is 2D (1, samples)
         if audio.dim() == 1:
             audio = audio.unsqueeze(0)
         
-        # Move to CPU for saving
+        # Move to CPU for saving (GPU->CPU transfer)
         audio_cpu = audio.cpu()
         
         torchaudio.save(
@@ -306,14 +378,18 @@ async def text_to_speech(request: TTSRequest):
             format="wav",
         )
         wav_buffer.seek(0)
+        encode_ms = (time.perf_counter() - encode_start) * 1000
+        
+        total_ms = (time.perf_counter() - total_start) * 1000
         
         # Calculate audio duration
         audio_duration_s = audio.shape[-1] / model.sample_rate
         rtf = generation_ms / (audio_duration_s * 1000)  # Real-time factor
         
         logger.info(
-            f"TTS: {len(request.text)} chars -> {audio_duration_s:.2f}s audio "
-            f"in {generation_ms:.0f}ms ({1/rtf:.1f}x realtime)"
+            f"TTS [{output_device}]: {len(request.text)} chars -> {audio_duration_s:.2f}s audio | "
+            f"gen={generation_ms:.0f}ms, encode={encode_ms:.0f}ms, total={total_ms:.0f}ms "
+            f"({1/rtf:.1f}x RT)"
         )
         
         return StreamingResponse(
@@ -323,6 +399,8 @@ async def text_to_speech(request: TTSRequest):
                 "X-Generation-Time-Ms": str(int(generation_ms)),
                 "X-Audio-Duration-S": f"{audio_duration_s:.2f}",
                 "X-Realtime-Factor": f"{1/rtf:.1f}",
+                "X-Encode-Time-Ms": str(int(encode_ms)),
+                "X-Total-Time-Ms": str(int(total_ms)),
             },
         )
         
