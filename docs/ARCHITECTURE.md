@@ -548,11 +548,13 @@ Stream to client
 
 ### GPU Utilization
 
-**VRAM Allocation:**
-- Model weights: ~1-2GB
-- Inference working memory: ~500MB-1GB
-- Total: ~2-3GB of 8GB available
-- Remaining: Available for larger batches or multiple models (future)
+**VRAM Allocation (Chatterbox Turbo - 350M params):**
+- Model weights: ~2.5GB
+- Inference working memory: ~1.5GB
+- Total: ~4GB of 8GB available
+- Whisper small.en (Q5_0): ~0.7GB
+- Combined Whisper + TTS: ~5GB
+- Remaining: ~3GB safety margin
 
 **CUDA Optimization:**
 - Automatic mixed precision (AMP) if supported
@@ -574,11 +576,11 @@ Stream to client
 
 ### Docker Containerization
 
-**Base Image:** `nvidia/cuda:11.8.0-runtime-ubuntu22.04`
+**Base Image:** `nvidia/cuda:12.1.1-runtime-ubuntu22.04`
 
 **Dockerfile Strategy:**
 ```dockerfile
-FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
 
 # Install Python
 RUN apt-get update && apt-get install -y python3.11 python3-pip
@@ -1273,7 +1275,7 @@ Transfer-Encoding: chunked
 - CPU: ~10-20% average (mostly idle, spikes during processing)
 - RAM: ~2-4GB (.NET + Qdrant + TTS)
 - GPU: ~25-30% (TTS generation only)
-- VRAM: ~2-3GB (Chatterbox model)
+- VRAM: ~4GB (Chatterbox Turbo model)
 - Network: <1 Mbps
 - Disk I/O: Minimal (Qdrant writes)
 
