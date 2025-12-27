@@ -1,3 +1,5 @@
+using EDDA.Server.Models;
+
 namespace EDDA.Server.Services;
 
 /// <summary>
@@ -14,6 +16,16 @@ public interface ITtsService
     /// Last health check result message.
     /// </summary>
     string? LastHealthStatus { get; }
+    
+    /// <summary>
+    /// Currently active TTS backend.
+    /// </summary>
+    TtsBackend ActiveBackend { get; }
+    
+    /// <summary>
+    /// Switch to a different TTS backend at runtime.
+    /// </summary>
+    Task SwitchBackendAsync(TtsBackend backend, CancellationToken cancellationToken = default);
     
     /// <summary>
     /// Initialize the service and start health monitoring.

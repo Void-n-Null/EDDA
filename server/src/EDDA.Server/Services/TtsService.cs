@@ -6,15 +6,16 @@ using EDDA.Server.Models;
 namespace EDDA.Server.Services;
 
 /// <summary>
-/// HTTP client for the Chatterbox TTS microservice.
-/// Implements circuit breaker and retry patterns for resilience.
+/// HTTP client for TTS microservices (Chatterbox or Piper).
+/// Implements circuit breaker, retry patterns, and runtime backend switching.
 /// </summary>
 public class TtsService : ITtsService, IDisposable
 {
-    private readonly HttpClient _httpClient;
+    private HttpClient _httpClient;
     private readonly TtsConfig _config;
     private readonly ILogger<TtsService> _logger;
     private readonly SemaphoreSlim _healthLock = new(1, 1);
+    private readonly SemaphoreSlim _switchLock = new(1, 1);
     
     private Timer? _healthCheckTimer;
     private CircuitState _circuitState = CircuitState.Closed;
@@ -26,19 +27,64 @@ public class TtsService : ITtsService, IDisposable
     
     public bool IsHealthy { get; private set; }
     public string? LastHealthStatus { get; private set; }
+    public TtsBackend ActiveBackend => _config.ActiveBackend;
     
     public TtsService(TtsConfig config, ILogger<TtsService> logger)
     {
         _config = config;
         _logger = logger;
         
-        _httpClient = new HttpClient
-        {
-            BaseAddress = new Uri(config.BaseUrl),
-            Timeout = TimeSpan.FromSeconds(config.TimeoutSeconds),
-        };
+        _httpClient = CreateHttpClient(config.ActiveUrl);
         
-        _logger.LogInformation("TTS Service configured: {Url}", config.BaseUrl);
+        _logger.LogInformation("TTS Service configured: {Backend} @ {Url}", 
+            config.BackendName, config.ActiveUrl);
+    }
+    
+    private HttpClient CreateHttpClient(string baseUrl)
+    {
+        return new HttpClient
+        {
+            BaseAddress = new Uri(baseUrl),
+            Timeout = TimeSpan.FromSeconds(_config.TimeoutSeconds),
+        };
+    }
+    
+    /// <summary>
+    /// Switch to a different TTS backend at runtime.
+    /// </summary>
+    public async Task SwitchBackendAsync(TtsBackend backend, CancellationToken cancellationToken = default)
+    {
+        if (backend == _config.ActiveBackend)
+        {
+            _logger.LogDebug("Already using {Backend}, no switch needed", backend);
+            return;
+        }
+        
+        await _switchLock.WaitAsync(cancellationToken);
+        try
+        {
+            var oldBackend = _config.ActiveBackend;
+            _config.ActiveBackend = backend;
+            
+            // Dispose old client and create new one
+            var oldClient = _httpClient;
+            _httpClient = CreateHttpClient(_config.ActiveUrl);
+            oldClient.Dispose();
+            
+            // Reset circuit breaker state for new backend
+            _circuitState = CircuitState.Closed;
+            _consecutiveFailures = 0;
+            
+            _logger.LogInformation("🔄 TTS switched: {OldBackend} → {NewBackend} @ {Url}",
+                oldBackend, backend, _config.ActiveUrl);
+            
+            // Check health of new backend
+            await CheckHealthAsync(cancellationToken);
+        }
+        finally
+        {
+            _switchLock.Release();
+        }
     }
     
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -290,6 +336,7 @@ public class TtsService : ITtsService, IDisposable
         _healthCheckTimer?.Dispose();
         _httpClient.Dispose();
         _healthLock.Dispose();
+        _switchLock.Dispose();
     }
     
     // ========================================================================

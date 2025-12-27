@@ -13,28 +13,35 @@ echo "Deploying Docker services to basement server..."
 echo ""
 
 # Sync Docker directory
-echo "[1/4] Syncing docker compose configuration..."
+echo "[1/5] Syncing docker compose configuration..."
 ssh $SERVER_HOST "mkdir -p $SERVER_DIR/docker"
 rsync -av --delete \
     "$PROJECT_ROOT/docker/" \
     "$SERVER_HOST:$SERVER_DIR/docker/"
 
-# Sync TTS service
-echo "[2/4] Syncing TTS service..."
+# Sync Chatterbox TTS service
+echo "[2/5] Syncing Chatterbox TTS service..."
 ssh $SERVER_HOST "mkdir -p $SERVER_DIR/tts-service"
 rsync -av --delete \
     "$PROJECT_ROOT/tts-service/" \
     "$SERVER_HOST:$SERVER_DIR/tts-service/"
 
+# Sync Piper TTS service
+echo "[3/5] Syncing Piper TTS service..."
+ssh $SERVER_HOST "mkdir -p $SERVER_DIR/piper-service"
+rsync -av --delete \
+    "$PROJECT_ROOT/piper-service/" \
+    "$SERVER_HOST:$SERVER_DIR/piper-service/"
+
 # Sync voices directory
-echo "[3/4] Syncing voices directory..."
+echo "[4/5] Syncing voices directory..."
 ssh $SERVER_HOST "mkdir -p $SERVER_DIR/voices"
 rsync -av \
     "$PROJECT_ROOT/voices/" \
     "$SERVER_HOST:$SERVER_DIR/voices/"
 
 # Start Docker services
-echo "[4/4] Starting Docker containers..."
+echo "[5/5] Starting Docker containers..."
 ssh $SERVER_HOST "cd $SERVER_DIR/docker && docker compose up -d --build"
 
 echo ""

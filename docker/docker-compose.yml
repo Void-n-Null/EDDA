@@ -1,14 +1,20 @@
 # EDDA Docker Compose Configuration
 #
 # Services:
-#   - tts-service: Chatterbox Turbo TTS (GPU-accelerated)
+#   - tts: Chatterbox Turbo TTS (GPU-accelerated, high quality, slower)
+#   - piper: Piper TTS (CPU, lower quality, much faster)
 #   - qdrant: Vector database for conversation memory
 #
 # Usage:
 #   docker-compose up -d              # Start all services
-#   docker-compose logs -f tts        # View TTS logs
+#   docker-compose logs -f tts        # View Chatterbox logs
+#   docker-compose logs -f piper      # View Piper logs
 #   docker-compose down               # Stop all services
-#   docker-compose build tts          # Rebuild TTS image
+#
+# TTS Selection:
+#   - Chatterbox (port 5000): High quality, 1.5x realtime, GPU required
+#   - Piper (port 5001): Good quality, 20-50x realtime, CPU only
+#   Set TTS_BASE_URL environment variable in C# server to switch.
 #
 # Note: The C# server runs directly on the host, not in Docker.
 
@@ -49,6 +55,33 @@ services:
       driver: "json-file"
       options:
         max-size: "50m"
+        max-file: "3"
+
+  # ============================================================================
+  # Piper TTS Service (Fast Alternative)
+  # ============================================================================
+  piper:
+    build:
+      context: ../piper-service
+      dockerfile: Dockerfile
+    container_name: edda-piper
+    ports:
+      - "5001:5001"
+    environment:
+      - TTS_PORT=5001
+      - LOG_LEVEL=INFO
+      - PIPER_MODEL=en_US-lessac-medium
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s  # Piper loads fast
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
         max-file: "3"
 
   # ============================================================================

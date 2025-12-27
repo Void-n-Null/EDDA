@@ -1,14 +1,35 @@
 namespace EDDA.Server.Models;
 
 /// <summary>
+/// Available TTS backends.
+/// </summary>
+public enum TtsBackend
+{
+    /// <summary>High quality, GPU-accelerated, ~1.5x realtime</summary>
+    Chatterbox,
+    
+    /// <summary>Good quality, CPU-only, ~20-50x realtime (much faster)</summary>
+    Piper
+}
+
+/// <summary>
 /// Configuration for the TTS microservice client.
 /// </summary>
 public class TtsConfig
 {
-    /// <summary>
-    /// Base URL of the TTS service.
-    /// </summary>
-    public string BaseUrl { get; init; } = "http://localhost:5000";
+    // ====================================================================
+    // CHANGE THIS TO SWITCH TTS BACKENDS
+    // ====================================================================
+    public const TtsBackend DEFAULT_BACKEND = TtsBackend.Piper;
+    // ====================================================================
+    
+    public string ChatterboxUrl { get; init; } = "http://localhost:5000";
+    public string PiperUrl { get; init; } = "http://localhost:5001";
+    
+    public TtsBackend ActiveBackend { get; set; } = DEFAULT_BACKEND;
+    
+    public string ActiveUrl => ActiveBackend == TtsBackend.Piper ? PiperUrl : ChatterboxUrl;
+    public string BackendName => ActiveBackend.ToString();
     
     /// <summary>
     /// Request timeout in seconds.
@@ -51,13 +72,13 @@ public class TtsConfig
     public float DefaultCfgWeight { get; init; } = 0.5f;
     
     /// <summary>
-    /// Create config from environment variables.
+    /// Create config. Uses DEFAULT_BACKEND const above.
     /// </summary>
     public static TtsConfig FromEnvironment()
     {
         return new TtsConfig
         {
-            BaseUrl = Environment.GetEnvironmentVariable("TTS_URL") ?? "http://localhost:5000",
+            ActiveBackend = DEFAULT_BACKEND,
             TimeoutSeconds = ParseIntEnv("TTS_TIMEOUT_SECONDS", 30),
             HealthCheckIntervalSeconds = ParseIntEnv("TTS_HEALTH_CHECK_INTERVAL", 30),
             RetryCount = ParseIntEnv("TTS_RETRY_COUNT", 3),
