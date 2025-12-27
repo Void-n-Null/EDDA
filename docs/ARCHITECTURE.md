@@ -131,11 +131,14 @@ The C# server is the brain of the system. It orchestrates all AI interactions, m
   "timestamp": "2025-12-25T10:30:45Z"
 }
 
-// Client → Server (end of speech)
+// Client → Server (end of speech - triggers immediate transcription)
 {
   "type": "end_speech",
   "timestamp": "2025-12-25T10:30:50Z"
 }
+// Note: The Pi client sends this after detecting ~320ms of silence via Silero VAD.
+// The server immediately begins transcription upon receiving this signal,
+// eliminating the need for server-side silence detection delays.
 
 // Server → Client (audio response)
 {
