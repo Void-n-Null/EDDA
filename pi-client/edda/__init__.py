@@ -1,0 +1,1 @@
+"""EDDA Voice Client package."""
