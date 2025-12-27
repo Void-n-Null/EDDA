@@ -48,6 +48,10 @@ coverage.xml
 !.vscode/launch.json
 !.vscode/extensions.json
 
+# JetBrains Rider / IntelliJ
+.idea/
+*.sln.DotSettings.user
+
 # Logs
 *.log
 
