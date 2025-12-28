@@ -1,0 +1,72 @@
+# EDDA TTS Service - Chatterbox Turbo (RTX 50-series Blackwell)
+# 
+# Build: docker build -f Dockerfile.blackwell -t edda-tts-blackwell .
+# Run:   docker run --gpus all -p 5000:5000 edda-tts-blackwell
+#
+# CUDA 12.8 runtime for PyTorch 2.7+ (required for RTX 50-series)
+# For RTX 20/30/40 series, use the standard Dockerfile
+
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+
+# Prevent interactive prompts during build
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System dependencies
+# Note: libavcodec-dev etc needed for torchcodec (torchaudio 2.9+ requirement)
+# libpython3.11-dev provides shared library needed by torchcodec
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    libpython3.11-dev \
+    python3-pip \
+    libsndfile1 \
+    ffmpeg \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libswresample-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python
+
+# Create non-root user for security
+RUN useradd -m -u 1000 edda
+WORKDIR /app
+
+# Install Python dependencies (Blackwell-specific)
+# NOTE: Chatterbox pins torch==2.6.0 which doesn't have CUDA 12.8 wheels.
+# We install our deps first (with correct torch), then chatterbox with --no-deps.
+COPY requirements.blackwell.txt requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --no-deps chatterbox-tts
+
+# Copy application code
+COPY server.py .
+COPY blackwell_wrapper.py .
+
+# Set ownership
+RUN chown -R edda:edda /app
+
+# Switch to non-root user
+USER edda
+
+# Environment configuration
+# LD_LIBRARY_PATH needed for torchcodec to find PyTorch and its own libraries
+ENV TTS_DEVICE=cuda \
+    TTS_PORT=5000 \
+    LOG_LEVEL=INFO \
+    PYTHONUNBUFFERED=1 \
+    LD_LIBRARY_PATH=/usr/local/lib/python3.11/dist-packages/torch/lib:/usr/local/lib/python3.11/dist-packages/torchcodec:${LD_LIBRARY_PATH}
+
+# Expose port
+EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+# Run the server via Blackwell wrapper (patches torchaudio.save for BytesIO compatibility)
+CMD ["python", "blackwell_wrapper.py"]

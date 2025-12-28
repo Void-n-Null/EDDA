@@ -3,7 +3,8 @@
 # Build: docker build -t edda-tts .
 # Run:   docker run --gpus all -p 5000:5000 edda-tts
 #
-# CUDA 12.1 runtime for PyTorch 2.2+
+# CUDA 12.1 runtime for PyTorch 2.2+ (works on RTX 20/30/40 series)
+# For RTX 50-series (Blackwell), use Dockerfile.blackwell
 
 FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
 

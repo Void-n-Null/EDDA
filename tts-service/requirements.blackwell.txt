@@ -1,0 +1,44 @@
+# Chatterbox TTS Service Dependencies - RTX 50-series (Blackwell)
+# Python 3.11+ required
+# For RTX 20/30/40 series, use requirements.txt
+#
+# NOTE: Chatterbox pins torch==2.6.0 which doesn't have CUDA 12.8 wheels.
+# We install torch separately first, then chatterbox with --no-deps.
+# See Dockerfile.blackwell for the install order.
+
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+
+# PyTorch with CUDA 12.8 (required for RTX 50-series Blackwell)
+# Must be installed BEFORE chatterbox
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch>=2.7.0
+torchaudio>=2.7.0
+torchcodec  # Required by torchaudio 2.9+ for audio encoding
+
+# Audio processing (chatterbox deps)
+numpy>=1.24.0,<2.0.0
+scipy>=1.11.0
+librosa>=0.10.0
+resampy>=0.4.0
+soundfile>=0.12.0
+
+# Chatterbox additional deps (from pip error output)
+s3tokenizer
+huggingface-hub
+safetensors
+transformers
+omegaconf
+einops
+tokenizers
+conformer==0.3.2
+diffusers>=0.29.0
+pykakasi==2.3.0
+pyloudnorm
+resemble-perth==1.0.1
+# spacy-pkuseg  # Only needed for Chinese, skip for now
+
+# Utilities
+python-multipart==0.0.18

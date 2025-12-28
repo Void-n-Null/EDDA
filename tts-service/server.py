@@ -101,10 +101,10 @@ class TTSModel:
             logger.info(f"Loading Chatterbox Turbo on device: {self.device}")
             start = time.perf_counter()
             
-            # Import and load Chatterbox
-            from chatterbox.tts import ChatterboxTTS
+            # Import and load Chatterbox Turbo (supports paralinguistic tags like [chuckle])
+            from chatterbox.tts_turbo import ChatterboxTurboTTS
             
-            self.model = ChatterboxTTS.from_pretrained(device=self.device)
+            self.model = ChatterboxTurboTTS.from_pretrained(device=self.device)
             
             self.load_time_ms = (time.perf_counter() - start) * 1000
             logger.info(f"Model loaded in {self.load_time_ms:.0f}ms")
@@ -355,6 +355,7 @@ async def text_to_speech(request: TTSRequest):
     
     Returns streaming WAV audio (24kHz, 16-bit, mono).
     """
+    logger.info(f"TTS request: voice_reference={request.voice_reference!r}")
     model = TTSModel.get_instance()
     
     if not model.is_ready:
@@ -402,8 +403,9 @@ async def text_to_speech(request: TTSRequest):
         audio_duration_s = audio.shape[-1] / model.sample_rate
         rtf = generation_ms / (audio_duration_s * 1000)  # Real-time factor
         
+        voice_mode = "cloned" if request.voice_reference else "default"
         logger.info(
-            f"TTS [{model.device}]: {len(request.text)} chars -> {audio_duration_s:.2f}s audio | "
+            f"TTS [{model.device}] ({voice_mode}): {len(request.text)} chars -> {audio_duration_s:.2f}s audio | "
             f"gen={generation_ms:.0f}ms, encode={encode_ms:.0f}ms, total={total_ms:.0f}ms "
             f"({1/rtf:.1f}x RT)"
         )
