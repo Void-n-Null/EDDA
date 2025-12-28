@@ -1,5 +1,3 @@
-using System.Net.Http.Json;
-using System.Text.Json;
 using System.Text.Json.Serialization;
 using EDDA.Server.Models;
 
@@ -41,18 +39,20 @@ public class TtsService : ITtsService, IDisposable
         // Fast HTTP client for endpoint health checks
         _healthCheckClient = new HttpClient
         {
-            Timeout = TimeSpan.FromMilliseconds(config.EndpointHealthTimeoutMs)
+            Timeout = TimeSpan.FromMilliseconds(TtsConfig.EndpointHealthTimeoutMs)
         };
         
         // Initialize with first endpoint (will be updated on first request)
         _config.ActiveChatterboxEndpoint = config.ChatterboxEndpoints.FirstOrDefault();
         _httpClient = CreateHttpClient(config.ActiveUrl);
         
-        _logger.LogInformation("TTS Service configured: {Backend} with {Count} endpoints", 
-            config.BackendName, config.ChatterboxEndpoints.Count);
-        foreach (var ep in config.ChatterboxEndpoints.OrderBy(e => e.Priority))
+        // Log endpoint configuration at startup
+        if (config.ChatterboxEndpoints.Count > 1)
         {
-            _logger.LogInformation("  Priority {Priority}: {Name} @ {Url}", ep.Priority, ep.Name, ep.Url);
+            var endpoints = string.Join(", ", config.ChatterboxEndpoints
+                .OrderBy(e => e.Priority)
+                .Select(e => e.Name));
+            _logger.LogInformation("  Endpoints: {Endpoints}", endpoints);
         }
     }
     
@@ -105,21 +105,25 @@ public class TtsService : ITtsService, IDisposable
     
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        _logger.LogInformation("Initializing TTS service health monitoring...");
-        
         // Initial health check
         await CheckHealthAsync(cancellationToken);
         
-        // Start periodic health checks
+        // Start periodic health checks (silent - only logs on state changes)
         _healthCheckTimer = new Timer(
-            async _ => await CheckHealthAsync(CancellationToken.None),
+            async void (_) =>
+            {
+                try
+                {
+                    await CheckHealthAsync(CancellationToken.None);
+                }
+                catch (Exception e)
+                {
+                    _logger.LogError(e, "TTS health monitor crashed");
+                }
+            },
             null,
             TimeSpan.FromSeconds(_config.HealthCheckIntervalSeconds),
             TimeSpan.FromSeconds(_config.HealthCheckIntervalSeconds));
-        
-        _logger.LogInformation(
-            "TTS health monitoring started (interval: {Interval}s)",
-            _config.HealthCheckIntervalSeconds);
     }
     
     public async Task<byte[]> GenerateSpeechAsync(
@@ -232,7 +236,7 @@ public class TtsService : ITtsService, IDisposable
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(_config.EndpointHealthTimeoutMs);
+            cts.CancelAfter(TtsConfig.EndpointHealthTimeoutMs);
             
             var response = await _healthCheckClient.GetAsync($"{url}/health", cts.Token);
             if (!response.IsSuccessStatusCode)
@@ -274,13 +278,9 @@ public class TtsService : ITtsService, IDisposable
                 ? rtfValues.FirstOrDefault()
                 : null;
             
-            _logger.LogInformation(
-                "TTS: {TextLen} chars -> {Bytes} bytes in {Duration:F0}ms (gen: {GenTime}ms, {Rtf}x RT)",
-                request.Text.Length,
-                audioBytes.Length,
-                durationMs,
-                genTimeHeader ?? "?",
-                rtfHeader ?? "?");
+            _logger.LogDebug(
+                "TTS: {TextLen} chars -> {Bytes}B in {Duration:F0}ms ({Rtf}x RT)",
+                request.Text.Length, audioBytes.Length, durationMs, rtfHeader ?? "?");
             
             RecordSuccess();
             return audioBytes;
@@ -405,19 +405,10 @@ public class TtsService : ITtsService, IDisposable
                 IsHealthy = health?.ModelLoaded == true;
                 LastHealthStatus = health?.Status ?? "unknown";
                 
-                if (IsHealthy)
+                // Only log state changes
+                if (!IsHealthy)
                 {
-                    _logger.LogDebug(
-                        "TTS health OK - VRAM: {Used:F1}/{Total:F1} GB",
-                        health?.VramUsedGb ?? 0,
-                        health?.VramTotalGb ?? 0);
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "TTS unhealthy: {Status} - {Error}",
-                        health?.Status,
-                        health?.LastError);
+                    _logger.LogWarning("TTS unhealthy: {Status}", health?.Status);
                 }
             }
             else
@@ -427,11 +418,17 @@ public class TtsService : ITtsService, IDisposable
                 _logger.LogWarning("TTS health check failed: {Status}", response.StatusCode);
             }
         }
-        catch (Exception ex)
+        catch (Exception)
         {
+            var wasHealthy = IsHealthy;
             IsHealthy = false;
-            LastHealthStatus = ex.Message;
-            _logger.LogWarning(ex, "TTS health check exception");
+            LastHealthStatus = "Connection failed";
+            
+            // Only log on state change (was healthy, now isn't)
+            if (wasHealthy)
+            {
+                _logger.LogWarning("TTS connection lost");
+            }
         }
         finally
         {

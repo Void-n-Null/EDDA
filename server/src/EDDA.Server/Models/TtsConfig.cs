@@ -33,30 +33,30 @@ public class TtsConfig
     // ====================================================================
     // CHANGE THIS TO SWITCH TTS BACKENDS
     // ====================================================================
-    public const TtsBackend DEFAULT_BACKEND = TtsBackend.Chatterbox;
+    //Chatterbox is slower, but much higher quality. Piper is much faster, but sounds like traditional robotic TTS
+    private const TtsBackend DefaultBackend = TtsBackend.Chatterbox; 
     // ====================================================================
     
     /// <summary>
     /// Chatterbox endpoints in priority order. Lower priority = preferred.
     /// The service will use the highest-priority available endpoint.
     /// </summary>
-    public List<ChatterboxEndpoint> ChatterboxEndpoints { get; init; } = new()
-    {
-        // Priority 1: Dev machine with RTX 5070 Ti (~3x realtime)
+    public List<ChatterboxEndpoint> ChatterboxEndpoints { get; } =
+    [
         new() { Name = "Dev-5070Ti", Url = "http://10.0.0.210:5000", Priority = 1 },
         // Priority 2: Basement server with RTX 2070 Super (~1.3x realtime)
-        new() { Name = "Basement-2070S", Url = "http://localhost:5000", Priority = 2 },
-    };
+        new() { Name = "Basement-2070S", Url = "http://localhost:5000", Priority = 2 }
+    ];
     
     /// <summary>
     /// Health check timeout for endpoint selection (ms).
     /// Keep this fast since we check before every TTS request.
     /// </summary>
-    public int EndpointHealthTimeoutMs { get; init; } = 150;
-    
-    public string PiperUrl { get; init; } = "http://localhost:5001";
-    
-    public TtsBackend ActiveBackend { get; set; } = DEFAULT_BACKEND;
+    public static int EndpointHealthTimeoutMs => 150;
+
+    private static string PiperUrl => "http://localhost:5001";
+
+    public TtsBackend ActiveBackend { get; set; } = DefaultBackend;
     
     /// <summary>
     /// Currently active Chatterbox endpoint (selected dynamically).
@@ -120,7 +120,7 @@ public class TtsConfig
     /// 2. Voice Cloning: Set to a .wav file path (on the TTS server filesystem, e.g. "/app/voices/asuka.wav")
     ///    to clone that voice. Requires ~5-10 seconds of clear reference audio.
     /// </summary>
-    public string? VoiceReference { get; init; } = null;
+    public string? VoiceReference { get; init; }
     
     /// <summary>
     /// Whether voice cloning is enabled (VoiceReference is set).
@@ -133,23 +133,26 @@ public class TtsConfig
     public bool TempoAdjustmentEnabled { get; init; } = true;
     
     /// <summary>
-    /// Minimum tempo (playback speed). 0.85 = 15% slower, buys time for TTS generation.
-    /// Going below ~0.82 starts to sound noticeably slow.
+    /// Minimum tempo (playback speed).
+    /// Going below ~0.85 starts to sound noticeably slow. This is just to buy a little
+    /// time if the sentence after this one is going to take a while to generate.
+    /// It doesn't help much but it doesn't hurt either.
     /// </summary>
-    public float MinTempo { get; init; } = 0.85f;
+    public float MinTempo { get; init; } = 0.92f;
     
     /// <summary>
-    /// Maximum tempo (playback speed). 1.15 = 15% faster when we're ahead of schedule.
-    /// Going above ~1.2 starts to sound noticeably rushed.
+    /// Maximum tempo (playback speed).
+    /// Going above ~1.08 starts to sound noticeably rushed.
+    /// Not a performance thing lol, just for parity with the min tempo. We just set this to 1.0 for now.
     /// </summary>
-    public float MaxTempo { get; init; } = 1.15f;
+    public float MaxTempo { get; init; } = 1f;
     
     /// <summary>
     /// Average milliseconds per character for TTS generation (used to estimate next sentence timing).
     /// Tune based on your TTS backend performance. Chatterbox: ~60-70ms/char, Piper: ~5-10ms/char.
     /// Intentionally conservative (high) to ensure tempo adjustment kicks in when needed.
     /// </summary>
-    public float AvgMsPerChar { get; init; } = 65.0f;
+    public float AvgMsPerChar { get; init; } = 30.0f;
     
     /// <summary>
     /// Create config. Uses DEFAULT_BACKEND const above.
@@ -158,7 +161,7 @@ public class TtsConfig
     {
         return new TtsConfig
         {
-            ActiveBackend = DEFAULT_BACKEND,
+            ActiveBackend = DefaultBackend,
             TimeoutSeconds = ParseIntEnv("TTS_TIMEOUT_SECONDS", 30),
             HealthCheckIntervalSeconds = ParseIntEnv("TTS_HEALTH_CHECK_INTERVAL", 30),
             RetryCount = ParseIntEnv("TTS_RETRY_COUNT", 3),
@@ -168,8 +171,8 @@ public class TtsConfig
             DefaultExaggeration = ParseFloatEnv("TTS_DEFAULT_EXAGGERATION", 0.5f),
             DefaultCfgWeight = ParseFloatEnv("TTS_DEFAULT_CFG_WEIGHT", 0.5f),
             TempoAdjustmentEnabled = ParseBoolEnv("TTS_TEMPO_ADJUSTMENT_ENABLED", true),
-            MinTempo = ParseFloatEnv("TTS_MIN_TEMPO", 0.85f),
-            MaxTempo = ParseFloatEnv("TTS_MAX_TEMPO", 1.15f),
+            MinTempo = ParseFloatEnv("TTS_MIN_TEMPO", 0.92f),
+            MaxTempo = ParseFloatEnv("TTS_MAX_TEMPO", 1f),
             AvgMsPerChar = ParseFloatEnv("TTS_AVG_MS_PER_CHAR", 65.0f),
             // Set TTS_VOICE_REFERENCE to a .wav path for cloning, or leave unset for default "lucy" voice
             VoiceReference = null,

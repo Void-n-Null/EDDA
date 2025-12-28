@@ -27,8 +27,18 @@ builder.Services.AddSingleton<ITtsService, TtsService>();
 // Audio processing (WAV parsing, tempo adjustment, etc.)
 builder.Services.AddSingleton<IAudioProcessor, AudioProcessor>();
 
+// Response pipeline (TTS orchestration, sentence streaming)
+builder.Services.AddSingleton<IResponsePipeline, ResponsePipeline>();
+
 // WebSocket handler
 builder.Services.AddTransient<WebSocketHandler>();
+
+// ============================================================================
+// Logging Configuration
+// ============================================================================
+
+builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Warning);
 
 var app = builder.Build();
 
@@ -36,35 +46,41 @@ var app = builder.Build();
 // Service Initialization
 // ============================================================================
 
-app.Logger.LogInformation("=" + new string('=', 59));
-app.Logger.LogInformation("EDDA Server Starting");
-app.Logger.LogInformation("=" + new string('=', 59));
+var log = app.Logger;
+
+log.LogInformation("");
+log.LogInformation("┌────────────────────────────────────────────────────────┐");
+log.LogInformation("│  EDDA Server                                           │");
+log.LogInformation("└────────────────────────────────────────────────────────┘");
 
 // Initialize Whisper (STT)
-app.Logger.LogInformation("Initializing Whisper STT...");
 var whisper = app.Services.GetRequiredService<IWhisperService>();
 await whisper.InitializeAsync();
 
 // Initialize TTS service health monitoring
-app.Logger.LogInformation("Initializing TTS service ({Backend}) at {Url}...", 
-    ttsConfig.BackendName, ttsConfig.ActiveUrl);
 var tts = app.Services.GetRequiredService<ITtsService>();
 await tts.InitializeAsync();
 
-app.Logger.LogInformation("TTS service ({Backend}): {Status}", 
-    ttsConfig.BackendName, tts.IsHealthy ? "OK" : "UNAVAILABLE");
+// Warm up response pipeline (loads embedded resources)
+_ = app.Services.GetRequiredService<IResponsePipeline>();
+
+// Summary log
+log.LogInformation("");
+log.LogInformation("  STT: {Status}", whisper.IsInitialized ? "✓ Ready" : "✗ FAILED");
+log.LogInformation("  TTS: {Status} ({Backend})", 
+    tts.IsHealthy ? "✓ Ready" : "✗ Unavailable", 
+    ttsConfig.BackendName);
+
 if (!tts.IsHealthy)
 {
-    app.Logger.LogWarning(
-        "TTS service not available at startup. Ensure Docker containers are running: " +
-        "cd docker && docker compose up -d");
-    app.Logger.LogWarning(
-        "To switch TTS backend, set TTS_URL environment variable:");
-    app.Logger.LogWarning(
-        "  Chatterbox (quality): TTS_URL=http://localhost:5000");
-    app.Logger.LogWarning(
-        "  Piper (speed):        TTS_URL=http://localhost:5001");
+    log.LogWarning("");
+    log.LogWarning("  TTS not responding. Start containers:");
+    log.LogWarning("    cd docker && docker compose up -d");
 }
+
+log.LogInformation("");
+log.LogInformation("  Listening on http://0.0.0.0:8080");
+log.LogInformation("");
 
 // ============================================================================
 // Endpoints
@@ -95,5 +111,4 @@ app.MapGet("/health", (IWhisperService whisper, ITtsService tts) => new
     tts = new { ready = tts.IsHealthy, status = tts.LastHealthStatus },
 });
 
-app.Logger.LogInformation("EDDA Server ready on http://0.0.0.0:8080");
 app.Run("http://0.0.0.0:8080");

@@ -19,16 +19,17 @@ public class WhisperService(AudioConfig config, ILogger<WhisperService> logger) 
     public async Task InitializeAsync()
     {
         var modelPath = ResolveModelPath();
+        var modelName = Path.GetFileName(modelPath);
         
         if (!File.Exists(modelPath))
         {
             if (!string.IsNullOrEmpty(config.ModelPath))
             {
-                logger.LogCritical("WHISPER_MODEL_PATH was set but model file does not exist: {Path}", modelPath);
+                logger.LogCritical("Model not found: {Path}", modelPath);
                 return;
             }
             
-            logger.LogInformation("Model not found at {Path}. Attempting download...", modelPath);
+            logger.LogInformation("  Downloading model: {Name}...", modelName);
             await DownloadModelAsync(modelPath);
         }
         
@@ -37,16 +38,16 @@ public class WhisperService(AudioConfig config, ILogger<WhisperService> logger) 
             try
             {
                 _factory = WhisperFactory.FromPath(modelPath);
-                logger.LogInformation("Whisper initialized with model: {Path}", modelPath);
+                logger.LogInformation("  Model: {Name} ({Threads} threads)", modelName, config.WhisperThreads);
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Failed to initialize Whisper factory");
+                logger.LogError(ex, "Failed to load Whisper model");
             }
         }
         else
         {
-            logger.LogCritical("Whisper model missing after download attempt");
+            logger.LogCritical("Model download failed: {Path}", modelPath);
         }
     }
     
@@ -154,15 +155,9 @@ public class WhisperService(AudioConfig config, ILogger<WhisperService> logger) 
         var audioSeconds = audioBytes / (double)config.BytesPerSecond;
         var realtimeFactor = audioSeconds > 0 ? (audioSeconds * 1000.0 / Math.Max(1, elapsedMs)) : 0.0;
         
-        logger.LogInformation(
-            "STT: {AudioBytes}b {AudioSeconds:F2}s -> {TextChars}ch in {ElapsedMs}ms ({RealtimeFactor:F1}xRT, {Segments} segmnts, {Threads} threads)",
-            audioBytes,
-            audioSeconds,
-            textChars,
-            elapsedMs,
-            realtimeFactor,
-            segments,
-            config.WhisperThreads);
+        logger.LogDebug(
+            "STT detail: {AudioSeconds:F2}s audio -> {TextChars} chars in {ElapsedMs}ms ({RealtimeFactor:F1}x RT)",
+            audioSeconds, textChars, elapsedMs, realtimeFactor);
     }
 }
 
