@@ -71,3 +71,5 @@ node_modules/
 voices/
 .cursor/rules/
 wakeword_examples/
+CLAUDE.md
+docs/
