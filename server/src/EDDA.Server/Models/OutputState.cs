@@ -1,24 +1,34 @@
 namespace EDDA.Server.Models;
 
 /// <summary>
-/// Voice output pipeline states (LLM + TTS flow).
-/// Tracks the state of response generation and playback.
+/// Response generation pipeline state (LLM side).
+/// Tracks what the AI is currently doing.
 /// </summary>
 /// <remarks>
-/// Future states to add:
-/// - Generating: LLM is streaming text, buffering sentences
-/// - ToolCall: AI requested a tool, playing loading audio
-/// - Speaking: TTS audio is streaming to the client
+/// This is SEPARATE from playback state. Generation and playback are independent:
+/// - The LLM can be generating sentence N+1 while sentence N is playing
+/// - Audio playback is managed client-side (queue of completed sentences)
+/// - Server fires TTS audio as sentences complete; client plays them sequentially
+/// 
+/// The server doesn't track playback state — it just sends audio and the client
+/// manages its own queue. This allows pipelining: generate → TTS → send → repeat,
+/// while client plays audio independently.
 /// </remarks>
 public enum OutputState
 {
     /// <summary>
-    /// No active response generation or playback.
+    /// No active response generation.
     /// </summary>
-    Idle
+    Idle,
     
-    // Future:
-    // Generating,
-    // ToolCall,
-    // Speaking
+    /// <summary>
+    /// LLM is streaming text. Completed sentences are sent to TTS immediately.
+    /// </summary>
+    Generating,
+    
+    /// <summary>
+    /// AI requested a tool call. Waiting for tool result before continuing.
+    /// Server should trigger loading audio on client during this state.
+    /// </summary>
+    ToolCall
 }
