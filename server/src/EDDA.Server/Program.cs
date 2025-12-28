@@ -24,6 +24,9 @@ builder.Services.AddSingleton<IWhisperService, WhisperService>();
 // Text-to-speech (Chatterbox via microservice)
 builder.Services.AddSingleton<ITtsService, TtsService>();
 
+// Audio processing (WAV parsing, tempo adjustment, etc.)
+builder.Services.AddSingleton<IAudioProcessor, AudioProcessor>();
+
 // WebSocket handler
 builder.Services.AddTransient<WebSocketHandler>();
 
