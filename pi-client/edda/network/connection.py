@@ -13,6 +13,13 @@ import websockets
 class MessageType(str, Enum):
     """Server message types."""
     AUDIO_PLAYBACK = "audio_playback"
+    AUDIO_LOADING = "audio_loading"  # Deprecated: use audio_cache_play instead
+    AUDIO_STREAM_START = "audio_stream_start"
+    AUDIO_STREAM_CHUNK = "audio_stream_chunk"
+    AUDIO_STREAM_END = "audio_stream_end"
+    AUDIO_SENTENCE = "audio_sentence"  # Complete WAV file per sentence
+    AUDIO_CACHE_PLAY = "audio_cache_play"  # Request to play cached audio
+    AUDIO_CACHE_STORE = "audio_cache_store"  # Send audio to cache
     RESPONSE_COMPLETE = "response_complete"
 
 
@@ -25,10 +32,61 @@ class AudioPlaybackMessage:
 
 
 @dataclass
+class AudioStreamStartMessage:
+    """Start of a raw PCM audio stream."""
+    stream: str  # "loading" | "tts" (or future)
+    sample_rate: int
+    channels: int
+    sample_format: str  # e.g. "s16le"
+    tempo: float = 1.0  # Playback speed multiplier (1.0 = normal, 0.92 = 8% slower)
+
+
+@dataclass
+class AudioStreamChunkMessage:
+    """PCM chunk for a previously started stream."""
+    stream: str
+    data: bytes
+
+
+@dataclass
+class AudioSentenceMessage:
+    """Complete WAV file for a single TTS sentence."""
+    data: bytes  # Complete WAV file
+    sentence_index: int
+    total_sentences: int
+    duration_ms: int
+    sample_rate: int
+    tempo_applied: float
+
+
+@dataclass
+class AudioCachePlayMessage:
+    """Request to play audio from cache."""
+    cache_key: str  # Unique identifier for cached audio
+    loop: bool = False  # Whether to loop the audio
+
+
+@dataclass
+class AudioCacheStoreMessage:
+    """Audio file to store in cache."""
+    cache_key: str
+    data: bytes  # Complete WAV file
+    sample_rate: int
+    channels: int
+    duration_ms: int
+
+
+@dataclass
 class ServerMessage:
     """Wrapper for messages received from server."""
     type: MessageType
     audio: Optional[AudioPlaybackMessage] = None
+    stream_start: Optional[AudioStreamStartMessage] = None
+    stream_chunk: Optional[AudioStreamChunkMessage] = None
+    audio_sentence: Optional[AudioSentenceMessage] = None
+    cache_play: Optional[AudioCachePlayMessage] = None
+    cache_store: Optional[AudioCacheStoreMessage] = None
+    stream: Optional[str] = None
 
 
 class ServerConnection:
@@ -75,7 +133,8 @@ class ServerConnection:
                 ...
         """
         print(f"Connecting to {self.server_url}...")
-        return websockets.connect(self.server_url)
+        # max_size=4MB to handle large audio messages (loading audio, TTS chunks)
+        return websockets.connect(self.server_url, max_size=4 * 1024 * 1024)
     
     async def send_audio_chunk(self, websocket, audio_data: bytes) -> bool:
         """
@@ -122,6 +181,30 @@ class ServerConnection:
             print(f"[ERROR] Failed to send end_speech: {e}")
             return False
     
+    async def send_cache_status(self, websocket, cache_key: str, status: str) -> bool:
+        """
+        Send cache status to the server.
+        
+        Args:
+            websocket: Active WebSocket connection
+            cache_key: The cache key being queried
+            status: "have" if cached, "need" if not cached
+            
+        Returns:
+            True if sent successfully, False otherwise
+        """
+        try:
+            message = {
+                "type": "audio_cache_status",
+                "cache_key": cache_key,
+                "status": status
+            }
+            await websocket.send(json.dumps(message))
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to send cache_status: {e}")
+            return False
+    
     async def receive_messages(self, websocket) -> AsyncGenerator[ServerMessage, None]:
         """
         Async generator that yields parsed messages from the server.
@@ -162,6 +245,67 @@ class ServerConnection:
                     total_chunks=data.get("total_chunks", 1)
                 )
                 return ServerMessage(type=MessageType.AUDIO_PLAYBACK, audio=audio_msg)
+            
+            elif msg_type == MessageType.AUDIO_LOADING.value:
+                # Loading audio - same structure but different type (can be interrupted)
+                audio_data = base64.b64decode(data["data"])
+                audio_msg = AudioPlaybackMessage(
+                    data=audio_data,
+                    chunk=1,
+                    total_chunks=1
+                )
+                return ServerMessage(type=MessageType.AUDIO_LOADING, audio=audio_msg)
+
+            elif msg_type == MessageType.AUDIO_STREAM_START.value:
+                start_msg = AudioStreamStartMessage(
+                    stream=data.get("stream", ""),
+                    sample_rate=int(data.get("sample_rate", 0)),
+                    channels=int(data.get("channels", 0)),
+                    sample_format=data.get("sample_format", ""),
+                    tempo=float(data.get("tempo", 1.0)),
+                )
+                return ServerMessage(type=MessageType.AUDIO_STREAM_START, stream_start=start_msg)
+
+            elif msg_type == MessageType.AUDIO_STREAM_CHUNK.value:
+                pcm = base64.b64decode(data["data"])
+                chunk_msg = AudioStreamChunkMessage(
+                    stream=data.get("stream", ""),
+                    data=pcm,
+                )
+                return ServerMessage(type=MessageType.AUDIO_STREAM_CHUNK, stream_chunk=chunk_msg)
+
+            elif msg_type == MessageType.AUDIO_STREAM_END.value:
+                return ServerMessage(type=MessageType.AUDIO_STREAM_END, stream=data.get("stream", ""))
+            
+            elif msg_type == MessageType.AUDIO_SENTENCE.value:
+                wav_data = base64.b64decode(data["data"])
+                sentence_msg = AudioSentenceMessage(
+                    data=wav_data,
+                    sentence_index=int(data.get("sentence_index", 1)),
+                    total_sentences=int(data.get("total_sentences", 1)),
+                    duration_ms=int(data.get("duration_ms", 0)),
+                    sample_rate=int(data.get("sample_rate", 24000)),
+                    tempo_applied=float(data.get("tempo_applied", 1.0)),
+                )
+                return ServerMessage(type=MessageType.AUDIO_SENTENCE, audio_sentence=sentence_msg)
+            
+            elif msg_type == MessageType.AUDIO_CACHE_PLAY.value:
+                cache_play_msg = AudioCachePlayMessage(
+                    cache_key=data.get("cache_key", ""),
+                    loop=bool(data.get("loop", False))
+                )
+                return ServerMessage(type=MessageType.AUDIO_CACHE_PLAY, cache_play=cache_play_msg)
+            
+            elif msg_type == MessageType.AUDIO_CACHE_STORE.value:
+                wav_data = base64.b64decode(data["data"])
+                cache_store_msg = AudioCacheStoreMessage(
+                    cache_key=data.get("cache_key", ""),
+                    data=wav_data,
+                    sample_rate=int(data.get("sample_rate", 24000)),
+                    channels=int(data.get("channels", 2)),
+                    duration_ms=int(data.get("duration_ms", 0))
+                )
+                return ServerMessage(type=MessageType.AUDIO_CACHE_STORE, cache_store=cache_store_msg)
             
             elif msg_type == MessageType.RESPONSE_COMPLETE.value:
                 return ServerMessage(type=MessageType.RESPONSE_COMPLETE)

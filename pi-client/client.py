@@ -15,6 +15,7 @@ import websockets
 
 from edda.audio import AudioDevice, AudioProcessor, AudioPlayer
 from edda.audio.device import AudioConfig, AudioStallError
+from edda.cache import CacheManager
 from edda.network import ServerConnection
 from edda.network.connection import MessageType
 from edda.speech import SpeechDetector, SpeechEvent
@@ -38,12 +39,123 @@ def load_config(path: str = "config.yaml") -> dict:
 
 async def receive_messages(connection: ServerConnection, websocket, 
                            player: AudioPlayer, playback_event: asyncio.Event,
-                           detector: SpeechDetector):
+                           detector: SpeechDetector, cache_manager: CacheManager):
     """Listen for incoming messages from the server."""
     try:
+        tts_first_pcm_chunk = True
+        stream_chunk_counts = {"loading": 0, "tts": 0}
+        pending_response_complete = False
         async for msg in connection.receive_messages(websocket):
-            if msg.type == MessageType.AUDIO_PLAYBACK:
+            if msg.type == MessageType.AUDIO_STREAM_START:
+                start = msg.stream_start
+                if start is None:
+                    continue
+                
+                # Starting any stream implies playback mode (pause mic capture)
+                playback_event.set()
+                
+                # New stream: stop anything currently playing (loading or prior TTS)
+                player.stop_current()
+                
+                # Reset TTFA marker when TTS stream starts
+                if start.stream == "tts":
+                    tts_first_pcm_chunk = True
+                
+                ok = player.start_stream(
+                    stream_kind=start.stream,
+                    sample_rate=start.sample_rate,
+                    channels=start.channels,
+                    sample_format=start.sample_format,
+                    tempo=start.tempo,
+                )
+                if not ok:
+                    print(f"[WARN] Failed to start stream {start.stream}")
+                else:
+                    stream_chunk_counts[start.stream] = 0
+                
+            elif msg.type == MessageType.AUDIO_STREAM_CHUNK:
+                chunk = msg.stream_chunk
+                if chunk is None:
+                    continue
+                
+                # TTFA: measure when first PCM chunk of TTS arrives
+                if tts_first_pcm_chunk and detector.last_speech_end_time:
+                    # Only treat it as TTFA when we're receiving TTS stream data
+                    if chunk.stream == "tts":
+                        ttfa = (datetime.now() - detector.last_speech_end_time).total_seconds() * 1000
+                        print(f"\n⚡ TIME TO FIRST AUDIO: {ttfa:.0f}ms")
+                        detector.clear_speech_end_time()
+                        tts_first_pcm_chunk = False
+                
+                stream_chunk_counts[chunk.stream] = stream_chunk_counts.get(chunk.stream, 0) + 1
+                if stream_chunk_counts[chunk.stream] % 25 == 0:
+                    print(f"[RECV] stream={chunk.stream} chunks={stream_chunk_counts[chunk.stream]}")
+                player.write_stream(chunk.data)
+                
+            elif msg.type == MessageType.AUDIO_STREAM_END:
+                if msg.stream:
+                    print(f"[RECV] stream_end: {msg.stream}")
+                player.end_stream()
+                # Note: TTS no longer uses streaming (uses audio_sentence instead)
+                # Loading audio still uses streaming
+            
+            elif msg.type == MessageType.AUDIO_SENTENCE:
+                sentence = msg.audio_sentence
+                if sentence is None:
+                    continue
+                
+                # Signal that we're playing (pauses mic capture)
+                playback_event.set()
+                
+                # Stop any loading audio that might be playing
+                player.stop_current()
+                
+                # Calculate TTFA on first sentence
+                if sentence.sentence_index == 1 and detector.last_speech_end_time:
+                    ttfa = (datetime.now() - detector.last_speech_end_time).total_seconds() * 1000
+                    print(f"\n⚡ TIME TO FIRST AUDIO: {ttfa:.0f}ms")
+                    detector.clear_speech_end_time()
+                
+                # Log sentence metadata
+                print(f"[RECV] Sentence {sentence.sentence_index}/{sentence.total_sentences}: "
+                      f"{sentence.duration_ms}ms @ {sentence.sample_rate}Hz "
+                      f"(tempo={sentence.tempo_applied:.3f}x, size={len(sentence.data)}B)")
+                
+                # Play sentence in executor (blocking playback)
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, 
+                    player.play_wav_sentence,
+                    sentence.data,
+                    sentence.sentence_index,
+                    sentence.total_sentences,
+                    sentence.duration_ms,
+                    sentence.sample_rate,
+                    sentence.tempo_applied
+                )
+                
+                # If this was the last sentence and we've already got RESPONSE_COMPLETE, resume mic
+                if sentence.sentence_index == sentence.total_sentences and pending_response_complete:
+                    print("[RECV] Final sentence played - resuming mic capture")
+                    playback_event.clear()
+                    pending_response_complete = False
+                
+            if msg.type == MessageType.AUDIO_LOADING:
+                # Loading audio - plays while waiting for TTS, can be interrupted
                 audio = msg.audio
+                print(f"[RECV] Loading audio ({len(audio.data)} bytes) - will be cut off when TTS ready")
+                
+                # Signal that we're playing (pauses mic capture)
+                playback_event.set()
+                
+                # Start async playback (non-blocking, can be interrupted)
+                player.play_wav_async(audio.data)
+                
+            elif msg.type == MessageType.AUDIO_PLAYBACK:
+                audio = msg.audio
+                
+                # Stop any loading audio that might be playing
+                player.stop_current()
                 
                 # Calculate time-to-first-audio on first chunk
                 if audio.chunk == 1 and detector.last_speech_end_time:
@@ -57,13 +169,71 @@ async def receive_messages(connection: ServerConnection, websocket,
                 # Signal that we're playing (pauses mic capture)
                 playback_event.set()
                 
-                # Play in executor to not block
-                loop = asyncio.get_event_loop()
+                # Play in executor to not block (blocking playback for real TTS)
+                loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, player.play_wav, audio.data)
                 
+            elif msg.type == MessageType.AUDIO_CACHE_PLAY:
+                cache_play = msg.cache_play
+                if cache_play is None:
+                    continue
+                
+                print(f"[CACHE] Requested to play: {cache_play.cache_key} (loop={cache_play.loop})")
+                
+                # Check if we have it cached
+                cached_data = cache_manager.get(cache_play.cache_key)
+                if cached_data:
+                    print(f"[CACHE] Playing from cache: {cache_play.cache_key} ({len(cached_data)}B)")
+                    
+                    # Signal playback mode
+                    playback_event.set()
+                    
+                    # Play async if looping, otherwise blocking
+                    if cache_play.loop:
+                        player.play_wav_async(cached_data)
+                    else:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(None, player.play_wav, cached_data)
+                else:
+                    print(f"[CACHE] Not cached, waiting for store: {cache_play.cache_key}")
+            
+            elif msg.type == MessageType.AUDIO_CACHE_STORE:
+                cache_store = msg.cache_store
+                if cache_store is None:
+                    continue
+                
+                # Check if already cached
+                if cache_manager.has(cache_store.cache_key):
+                    print(f"[CACHE] Already cached: {cache_store.cache_key}")
+                else:
+                    # Store in cache
+                    cache_manager.store(
+                        cache_store.cache_key,
+                        cache_store.data,
+                        cache_store.sample_rate,
+                        cache_store.channels,
+                        cache_store.duration_ms
+                    )
+                    
+                    # If we haven't played it yet (from AUDIO_CACHE_PLAY), play it now
+                    # Check if the player isn't already playing something
+                    print(f"[CACHE] Stored and playing: {cache_store.cache_key}")
+                    playback_event.set()
+                    player.play_wav_async(cache_store.data)
+            
             elif msg.type == MessageType.RESPONSE_COMPLETE:
-                print("[RECV] Response complete - resuming mic capture")
-                playback_event.clear()
+                # Server is done sending.
+                pending_response_complete = True
+                
+                # Stop any async playback (loading audio loops)
+                # If TTS sentences are playing, they'll handle cleanup themselves
+                # If no TTS was sent, we need to stop loading audio and resume capture
+                player.stop_current()
+                
+                # If playback_event is still set (meaning no TTS sentences cleared it), clear now
+                if playback_event.is_set():
+                    print("[RECV] Response complete - resuming mic capture")
+                    playback_event.clear()
                 
     except websockets.exceptions.ConnectionClosed:
         raise
@@ -134,7 +304,8 @@ async def capture_and_send(connection: ServerConnection, websocket,
 
 async def connect_and_stream(device: AudioDevice, processor: AudioProcessor,
                              player: AudioPlayer, detector: SpeechDetector,
-                             connection: ServerConnection, config: dict):
+                             connection: ServerConnection, cache_manager: CacheManager,
+                             config: dict):
     """Connect to server and stream. Reconnects on failure."""
     reconnect_delay = config.get('network', {}).get('reconnect_delay', 3)
     
@@ -151,7 +322,7 @@ async def connect_and_stream(device: AudioDevice, processor: AudioProcessor,
                 )
                 receive_task = asyncio.create_task(
                     receive_messages(connection, websocket, player,
-                                     playback_event, detector)
+                                     playback_event, detector, cache_manager)
                 )
                 
                 done, pending = await asyncio.wait(
@@ -228,12 +399,20 @@ async def main():
     player = AudioPlayer()
     detector = SpeechDetector(speech_config)
     
+    # Initialize cache manager
+    cache_cfg = config.get('cache', {})
+    cache_manager = CacheManager(
+        cache_dir=cache_cfg.get('directory', './cache'),
+        clear_policy=cache_cfg.get('clear_policy', 'never'),
+        max_size_mb=cache_cfg.get('max_size_mb', 100)
+    )
+    
     server_cfg = config.get('server', {})
     server_url = f"ws://{server_cfg.get('host', '10.0.0.176')}:{server_cfg.get('port', 8080)}/ws"
     connection = ServerConnection(server_url)
     
     try:
-        await connect_and_stream(device, processor, player, detector, connection, config)
+        await connect_and_stream(device, processor, player, detector, connection, cache_manager, config)
     except KeyboardInterrupt:
         print("Interrupted by user.")
     finally:

@@ -27,3 +27,17 @@ vad:
 network:
   # Reconnection delay in seconds after connection failure
   reconnect_delay: 3
+
+cache:
+  # Directory to store cached audio files
+  # Relative paths are relative to the Pi client directory
+  directory: "./cache"
+  
+  # Cache clearing policy:
+  #  - "on_start": Clear cache every time the client starts
+  #  - "never": Keep cache indefinitely
+  #  - TTL in hours (e.g., 1 for hourly, 24 for daily, 168 for weekly, 720 for monthly)
+  clear_policy: 1  # Clear files older than 1 hour
+  
+  # Maximum cache size in MB (0 = unlimited)
+  max_size_mb: 100
