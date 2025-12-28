@@ -130,27 +130,27 @@ public class WebSocketHandler
     {
         _logger.LogInformation("WebSocket connection established");
         
+        // Create session - encapsulates all state for this connection
+        using var session = new VoiceSession(_whisper, _config, _logger);
+        
+        // Wire up the response handler - fires when user finishes speaking and timeout expires
+        session.ResponseReady += async (transcription, pipelineTimer) =>
+        {
+            // Echo mode: Repeat what the user said (tests full STT -> TTS pipeline)
+            // TODO: Replace with actual LLM response
+            var sttAndWaitMs = pipelineTimer?.ElapsedMilliseconds ?? 0;
+            var llmStart = pipelineTimer?.ElapsedMilliseconds ?? 0;
+            
+            var responseText = $"You said [chuckle] {transcription}.";
+            var llmMs = (pipelineTimer?.ElapsedMilliseconds ?? 0) - llmStart;
+            
+            _logger.LogInformation("⏱️ Pipeline | STT+Wait: {SttWaitMs}ms | LLM: {LlmMs}ms (echo mode) | Starting TTS...",
+                sttAndWaitMs, llmMs);
+            
+            await SendTtsResponseAsync(webSocket, responseText, pipelineTimer);
+        };
+        
         var buffer = new byte[1024 * 16];
-        var audioStream = new MemoryStream();
-        var cts = new CancellationTokenSource();
-        
-        // State machine
-        var state = ConnectionState.Idle;
-        var lastSpeechEndTime = DateTime.UtcNow;
-        var transcriptionQueue = new List<string>();
-        var stateLock = new object();
-        
-        // Track when end_speech was received for complete TTFA measurement
-        Stopwatch? endSpeechTimer = null;
-        
-        // Background task to check for "waiting for more" timeout
-        var stateCheckTask = RunStateCheckerAsync(
-            webSocket, cts.Token, stateLock,
-            () => state,
-            s => state = s,
-            () => lastSpeechEndTime,
-            transcriptionQueue,
-            () => endSpeechTimer);
         
         try
         {
@@ -160,13 +160,7 @@ public class WebSocketHandler
                 
                 if (result.MessageType == WebSocketMessageType.Text)
                 {
-                    await ProcessTextMessageAsync(
-                        buffer, result.Count, audioStream, stateLock,
-                        () => state,
-                        s => state = s,
-                        t => lastSpeechEndTime = t,
-                        transcriptionQueue,
-                        sw => endSpeechTimer = sw);
+                    await ProcessMessageAsync(session, buffer, result.Count);
                 }
                 else if (result.MessageType == WebSocketMessageType.Close)
                 {
@@ -179,95 +173,12 @@ public class WebSocketHandler
         {
             _logger.LogError(ex, "Connection error");
         }
-        finally
-        {
-            await cts.CancelAsync();
-            try { await stateCheckTask; }
-            catch
-            {
-                // ignored
-            }
-        }
     }
     
-    private async Task RunStateCheckerAsync(
-        WebSocket webSocket,
-        CancellationToken ct,
-        object stateLock,
-        Func<ConnectionState> getState,
-        Action<ConnectionState> setState,
-        Func<DateTime> getLastSpeechEnd,
-        List<string> transcriptionQueue,
-        Func<Stopwatch?> getEndSpeechTimer)
-    {
-        while (!ct.IsCancellationRequested && webSocket.State == WebSocketState.Open)
-        {
-            try
-            {
-                await Task.Delay(100, ct);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            
-            List<string>? queuedTranscriptions = null;
-            long waitTimeMs = 0;
-            Stopwatch? pipelineTimer = null;
-            
-            lock (stateLock)
-            {
-                if (getState() == ConnectionState.WaitingForMore)
-                {
-                    var timeSinceLastSpeech = (DateTime.UtcNow - getLastSpeechEnd()).TotalMilliseconds;
-                    
-                    if (timeSinceLastSpeech >= _config.WaitingForMoreTimeoutMs && transcriptionQueue.Count > 0)
-                    {
-                        queuedTranscriptions = [.. transcriptionQueue];
-                        transcriptionQueue.Clear();
-                        setState(ConnectionState.Idle);
-                        waitTimeMs = (long)timeSinceLastSpeech;
-                        pipelineTimer = getEndSpeechTimer();
-                        
-                        _logger.LogDebug("STATE: WaitingForMore -> Idle (timeout, {Count} transcriptions)", queuedTranscriptions.Count);
-                    }
-                }
-            }
-            
-            if (queuedTranscriptions is { Count: > 0 })
-            {
-                var combinedQuery = string.Join(" ", queuedTranscriptions).Trim();
-                _logger.LogInformation("HEARD: \"{Query}\"", combinedQuery);
-                
-                // Log time elapsed since end_speech was received (includes STT + wait)
-                var sttAndWaitMs = pipelineTimer?.ElapsedMilliseconds ?? 0;
-                
-                // Echo mode: Repeat what the user said (tests full STT -> TTS pipeline)
-                // TODO: Replace with actual LLM response
-                var llmStart = pipelineTimer?.ElapsedMilliseconds ?? 0;
-                // Force multi-sentence output so streaming (sentence-by-sentence) is observable.
-                // (Our TTS backend returns a full WAV per request, so we can't stream *within* a sentence yet.)
-                var responseText = $"You said [chuckle] {combinedQuery}.";
-                var llmMs = (pipelineTimer?.ElapsedMilliseconds ?? 0) - llmStart;
-                
-                _logger.LogInformation("⏱️ Pipeline | STT+Wait: {SttWaitMs}ms | LLM: {LlmMs}ms (echo mode) | Starting TTS...",
-                    sttAndWaitMs, llmMs);
-                
-                await SendTtsResponseAsync(webSocket, responseText, pipelineTimer);
-            }
-        }
-    }
-    
-    private async Task ProcessTextMessageAsync(
-        byte[] buffer,
-        int count,
-        MemoryStream audioStream,
-        object stateLock,
-        Func<ConnectionState> getState,
-        Action<ConnectionState> setState,
-        Action<DateTime> setLastSpeechEnd,
-        List<string> transcriptionQueue,
-        Action<Stopwatch> setEndSpeechTimer)
+    /// <summary>
+    /// Parse and dispatch incoming WebSocket message to the session.
+    /// </summary>
+    private async Task ProcessMessageAsync(VoiceSession session, byte[] buffer, int count)
     {
         var json = Encoding.UTF8.GetString(buffer, 0, count);
         
@@ -279,98 +190,21 @@ public class WebSocketHandler
         
         var messageType = typeProp.GetString();
         
-        if (messageType == "audio_chunk")
+        switch (messageType)
         {
-            await HandleAudioChunkAsync(root, audioStream, stateLock, getState, setState);
-        }
-        else if (messageType == "end_speech")
-        {
-            await HandleEndSpeechAsync(audioStream, stateLock, setState, setLastSpeechEnd, transcriptionQueue, setEndSpeechTimer);
-        }
-    }
-    
-    private async Task HandleAudioChunkAsync(
-        JsonElement root,
-        MemoryStream audioStream,
-        object stateLock,
-        Func<ConnectionState> getState,
-        Action<ConnectionState> setState)
-    {
-        var dataBase64 = root.GetProperty("data").GetString();
-        if (dataBase64 == null)
-            return;
-        
-        var audioData = Convert.FromBase64String(dataBase64);
-        await audioStream.WriteAsync(audioData);
-        
-        lock (stateLock)
-        {
-            if (getState() != ConnectionState.ReceivingSpeech)
+            case "audio_chunk":
             {
-                var prevState = getState();
-                setState(ConnectionState.ReceivingSpeech);
-                _logger.LogDebug("STATE: {Prev} -> ReceivingSpeech", prevState);
-            }
-        }
-    }
-    
-    private async Task HandleEndSpeechAsync(
-        MemoryStream audioStream,
-        object stateLock,
-        Action<ConnectionState> setState,
-        Action<DateTime> setLastSpeechEnd,
-        List<string> transcriptionQueue,
-        Action<Stopwatch> setEndSpeechTimer)
-    {
-        if (audioStream.Length == 0)
-            return;
-        
-        // Start the pipeline timer - this is when user finished speaking (from server's perspective)
-        var pipelineTimer = Stopwatch.StartNew();
-        setEndSpeechTimer(pipelineTimer);
-        
-        _logger.LogDebug("Received end_speech signal");
-        
-        var audioData = audioStream.ToArray();
-        audioStream.SetLength(0);
-        
-        var audioBytes = audioData.Length;
-        var audioSeconds = audioBytes / (double)_config.BytesPerSecond;
-        
-        _logger.LogInformation("⏱️ STT Start | {Bytes} bytes ({AudioSec:F2}s audio)", audioBytes, audioSeconds);
-        var sttStart = pipelineTimer.ElapsedMilliseconds;
-        var transcription = await _whisper.TranscribeAsync(audioData);
-        var sttMs = pipelineTimer.ElapsedMilliseconds - sttStart;
-        
-        _logger.LogInformation("⏱️ STT Done | {Ms}ms for {AudioSec:F2}s audio ({Rtf:F1}x realtime) -> \"{Text}\"",
-            sttMs,
-            audioSeconds,
-            audioSeconds > 0 ? audioSeconds * 1000.0 / sttMs : 0,
-            transcription.Length > 50 ? transcription[..50] + "..." : transcription);
-        
-        lock (stateLock)
-        {
-            if (!string.IsNullOrWhiteSpace(transcription))
-            {
-                transcriptionQueue.Add(transcription);
-                setLastSpeechEnd(DateTime.UtcNow);
-                setState(ConnectionState.WaitingForMore);
-                
-                _logger.LogDebug("STATE: ReceivingSpeech -> WaitingForMore (queued: \"{Text}\", total: {Count})",
-                    transcription, transcriptionQueue.Count);
-            }
-            else
-            {
-                if (transcriptionQueue.Count > 0)
+                var dataBase64 = root.GetProperty("data").GetString();
+                if (dataBase64 != null)
                 {
-                    setLastSpeechEnd(DateTime.UtcNow);
-                    setState(ConnectionState.WaitingForMore);
+                    var audioData = Convert.FromBase64String(dataBase64);
+                    await session.HandleAudioChunkAsync(audioData);
                 }
-                else
-                {
-                    setState(ConnectionState.Idle);
-                }
+                break;
             }
+            case "end_speech":
+                await session.HandleEndSpeechAsync();
+                break;
         }
     }
     
