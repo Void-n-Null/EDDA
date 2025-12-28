@@ -225,6 +225,7 @@ public class TtsService : ITtsService, IDisposable
     
     /// <summary>
     /// Quick health check for endpoint selection (fast timeout, no logging).
+    /// Checks both HTTP status AND model_loaded field to ensure endpoint is actually usable.
     /// </summary>
     private async Task<bool> IsEndpointHealthyAsync(string url, CancellationToken cancellationToken)
     {
@@ -234,7 +235,12 @@ public class TtsService : ITtsService, IDisposable
             cts.CancelAfter(_config.EndpointHealthTimeoutMs);
             
             var response = await _healthCheckClient.GetAsync($"{url}/health", cts.Token);
-            return response.IsSuccessStatusCode;
+            if (!response.IsSuccessStatusCode)
+                return false;
+            
+            // Must also check model_loaded - endpoint returning 200 with model_loaded=false is NOT healthy
+            var health = await response.Content.ReadFromJsonAsync<HealthResponse>(cts.Token);
+            return health?.ModelLoaded == true;
         }
         catch
         {
