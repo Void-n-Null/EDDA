@@ -16,6 +16,10 @@ rsync -avz --delete \
   --exclude 'obj/' \
   --exclude '.git/' \
   --exclude 'models/' \
+  --exclude 'voices/' \
+  --exclude 'docker/' \
+  --exclude 'tts-service/' \
+  --exclude 'piper-service/' \
   server/src/ $SERVER_HOST:$SERVER_DIR/
 
 echo "Building on server..."

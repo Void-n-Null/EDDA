@@ -12,6 +12,10 @@ rsync -avz --delete \
   --exclude 'obj/' \
   --exclude '.git/' \
   --exclude 'models/' \
+  --exclude 'voices/' \
+  --exclude 'docker/' \
+  --exclude 'tts-service/' \
+  --exclude 'piper-service/' \
   server/src/ $SERVER_HOST:$SERVER_DIR/ 2>&1 | grep -v "WARNING: connection"
 
 # Build

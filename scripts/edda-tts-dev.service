@@ -1,0 +1,28 @@
+# EDDA TTS Service - Dev Machine
+#
+# Install:
+#   sudo cp scripts/edda-tts-dev.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable edda-tts-dev
+#   sudo systemctl start edda-tts-dev
+#
+# Check status:
+#   sudo systemctl status edda-tts-dev
+#   docker logs -f edda-tts-dev
+
+[Unit]
+Description=EDDA TTS Service (Chatterbox on 5070 Ti)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/mnt/dev/EDDA/docker
+ExecStart=/usr/bin/docker-compose -f docker-compose.dev.yml up -d
+ExecStop=/usr/bin/docker-compose -f docker-compose.dev.yml down
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
