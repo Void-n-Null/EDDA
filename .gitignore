@@ -70,3 +70,4 @@ Thumbs.db
 node_modules/
 voices/
 .cursor/rules/
+wakeword_examples/
