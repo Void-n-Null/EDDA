@@ -39,9 +39,11 @@ services:
       - LOG_LEVEL=INFO
       - NVIDIA_VISIBLE_DEVICES=all  # Make GPU visible to container
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility  # Required for CUDA
+      - HF_TOKEN=${HF_TOKEN}  # Required for Chatterbox Turbo
     volumes:
       # Mount voice reference files (for voice cloning)
-      - ../voices:/app/voices:ro
+      # :z enables SELinux shared label for container access
+      - ../voices:/app/voices:ro,z
     deploy:
       resources:
         reservations:

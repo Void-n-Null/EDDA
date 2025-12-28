@@ -68,5 +68,5 @@ Thumbs.db
 # Project Specific
 /tmp/edda.*
 node_modules/
-
+voices/
 .cursor/rules/
