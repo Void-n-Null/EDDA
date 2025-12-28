@@ -17,6 +17,7 @@ public class WebSocketHandler
 {
     private readonly IWhisperService _whisper;
     private readonly ITtsService _tts;
+    private readonly IAudioProcessor _audio;
     private readonly AudioConfig _config;
     private readonly ILogger<WebSocketHandler> _logger;
     private readonly byte[] _loadingAudio;
@@ -24,11 +25,13 @@ public class WebSocketHandler
     public WebSocketHandler(
         IWhisperService whisper,
         ITtsService tts,
+        IAudioProcessor audio,
         AudioConfig config,
         ILogger<WebSocketHandler> logger)
     {
         _whisper = whisper;
         _tts = tts;
+        _audio = audio;
         _config = config;
         _logger = logger;
         
@@ -54,183 +57,6 @@ public class WebSocketHandler
         using var ms = new MemoryStream();
         stream.CopyTo(ms);
         return ms.ToArray();
-    }
-
-    private sealed record WavPcm(byte[] Pcm, int SampleRate, int Channels, int BitsPerSample);
-
-    private static bool TryParsePcmWav(byte[] wav, out WavPcm? parsed)
-    {
-        parsed = null;
-        if (wav.Length < 44) return false;
-        if (Encoding.ASCII.GetString(wav, 0, 4) != "RIFF") return false;
-        if (Encoding.ASCII.GetString(wav, 8, 4) != "WAVE") return false;
-
-        var offset = 12;
-        ushort audioFormat = 0;
-        ushort channels = 0;
-        int sampleRate = 0;
-        ushort bitsPerSample = 0;
-        int? dataOffset = null;
-        int? dataSize = null;
-
-        while (offset + 8 <= wav.Length)
-        {
-            var chunkId = Encoding.ASCII.GetString(wav, offset, 4);
-            var chunkSize = BitConverter.ToInt32(wav, offset + 4);
-            offset += 8;
-
-            if (chunkSize < 0 || offset + chunkSize > wav.Length)
-                return false;
-
-            if (chunkId == "fmt ")
-            {
-                if (chunkSize < 16) return false;
-                audioFormat = BitConverter.ToUInt16(wav, offset + 0);
-                channels = BitConverter.ToUInt16(wav, offset + 2);
-                sampleRate = BitConverter.ToInt32(wav, offset + 4);
-                bitsPerSample = BitConverter.ToUInt16(wav, offset + 14);
-            }
-            else if (chunkId == "data")
-            {
-                dataOffset = offset;
-                dataSize = chunkSize;
-                break;
-            }
-
-            // Word-aligned chunks
-            offset += chunkSize + (chunkSize % 2);
-        }
-
-        if (audioFormat != 1) return false; // PCM only
-        if (channels <= 0 || sampleRate <= 0) return false;
-        if (bitsPerSample != 16) return false;
-        if (dataOffset is null || dataSize is null) return false;
-        if (dataOffset.Value + dataSize.Value > wav.Length) return false;
-
-        var pcm = new byte[dataSize.Value];
-        Buffer.BlockCopy(wav, dataOffset.Value, pcm, 0, dataSize.Value);
-        parsed = new WavPcm(pcm, sampleRate, channels, bitsPerSample);
-        return true;
-    }
-
-    /// <summary>
-    /// Add silence padding to the beginning of a WAV file to prevent audio device startup clipping.
-    /// </summary>
-    private static byte[] AddSilencePadding(byte[] wavBytes, int paddingMs = 150)
-    {
-        if (!TryParsePcmWav(wavBytes, out var wav) || wav == null)
-            return wavBytes;
-        
-        // Calculate padding size in bytes
-        var bytesPerMs = (wav.SampleRate * wav.Channels * (wav.BitsPerSample / 8)) / 1000.0;
-        var paddingBytes = (int)(paddingMs * bytesPerMs);
-        
-        // Ensure even number of bytes for 16-bit audio
-        if (paddingBytes % 2 != 0)
-            paddingBytes++;
-        
-        // Create silence (zeros)
-        var silence = new byte[paddingBytes];
-        
-        // Combine silence + original PCM
-        var paddedPcm = new byte[silence.Length + wav.Pcm.Length];
-        Buffer.BlockCopy(silence, 0, paddedPcm, 0, silence.Length);
-        Buffer.BlockCopy(wav.Pcm, 0, paddedPcm, silence.Length, wav.Pcm.Length);
-        
-        // Rebuild WAV with new PCM data
-        return BuildWavFile(paddedPcm, wav.SampleRate, wav.Channels, wav.BitsPerSample);
-    }
-    
-    /// <summary>
-    /// Build a complete WAV file from PCM data.
-    /// </summary>
-    private static byte[] BuildWavFile(byte[] pcmData, int sampleRate, int channels, int bitsPerSample)
-    {
-        var blockAlign = channels * (bitsPerSample / 8);
-        var byteRate = sampleRate * blockAlign;
-        var dataSize = pcmData.Length;
-        var fileSize = 36 + dataSize;
-        
-        using var ms = new MemoryStream();
-        using var writer = new BinaryWriter(ms);
-        
-        // RIFF header
-        writer.Write("RIFF"u8.ToArray());
-        writer.Write(fileSize);
-        writer.Write("WAVE"u8.ToArray());
-        
-        // fmt chunk
-        writer.Write("fmt "u8.ToArray());
-        writer.Write(16); // fmt chunk size
-        writer.Write((short)1); // PCM format
-        writer.Write((short)channels);
-        writer.Write(sampleRate);
-        writer.Write(byteRate);
-        writer.Write((short)blockAlign);
-        writer.Write((short)bitsPerSample);
-        
-        // data chunk
-        writer.Write("data"u8.ToArray());
-        writer.Write(dataSize);
-        writer.Write(pcmData);
-        
-        return ms.ToArray();
-    }
-    
-    /// <summary>
-    /// Apply tempo adjustment to a WAV file using ffmpeg's atempo filter.
-    /// Returns the adjusted WAV bytes, or the original if tempo is ~1.0.
-    /// </summary>
-    private async Task<byte[]> AdjustTempoAsync(byte[] wavBytes, float tempo, CancellationToken ct = default)
-    {
-        if (Math.Abs(tempo - 1.0f) < 0.01f)
-            return wavBytes;
-        
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "ffmpeg",
-                Arguments = $"-loglevel error -f wav -i pipe:0 -filter:a \"atempo={tempo:F3}\" -f wav pipe:1",
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        
-        process.Start();
-        
-        // All three streams must be handled concurrently to prevent deadlock:
-        // - stdin: we write input data
-        // - stdout: ffmpeg writes output data (buffer can fill if we don't read)
-        // - stderr: ffmpeg writes errors (buffer can fill if we don't read)
-        
-        var stderrTask = process.StandardError.ReadToEndAsync(ct);
-        
-        using var output = new MemoryStream();
-        var stdoutTask = process.StandardOutput.BaseStream.CopyToAsync(output, ct);
-        
-        // Write stdin in background, then close it
-        var stdinTask = Task.Run(async () =>
-        {
-            await process.StandardInput.BaseStream.WriteAsync(wavBytes, ct);
-            process.StandardInput.Close();
-        }, ct);
-        
-        // Wait for all I/O to complete
-        await Task.WhenAll(stdinTask, stdoutTask, stderrTask);
-        await process.WaitForExitAsync(ct);
-        
-        if (process.ExitCode != 0)
-        {
-            var stderr = await stderrTask;
-            _logger.LogWarning("ffmpeg tempo adjustment failed (exit {Code}): {Error}", process.ExitCode, stderr);
-            return wavBytes; // Return original on failure
-        }
-        
-        return output.ToArray();
     }
 
     private static async Task SendJsonAsync(WebSocket webSocket, object payload, CancellationToken ct = default)
@@ -606,13 +432,13 @@ public class WebSocketHandler
         // Request loading audio from cache (with fallback data if not cached).
         var loadingTask = Task.Run(async () =>
         {
-            if (!TryParsePcmWav(_loadingAudio, out var loading) || loading == null)
+            if (!_audio.TryParsePcmWav(_loadingAudio, out var loading) || loading == null)
                 return;
 
             const string cacheKey = "loading_v2"; // v2 includes silence padding
             
             // Add silence padding to prevent audio device startup clipping
-            var paddedLoading = AddSilencePadding(_loadingAudio, paddingMs: 150);
+            var paddedLoading = _audio.AddSilencePadding(_loadingAudio, paddingMs: 150);
             var durationMs = (int)Math.Round(loading.Pcm.Length * 1000.0 / (loading.SampleRate * loading.Channels * 2.0)) + 150;
 
             // Request cached playback (client will use cache if available)
@@ -661,7 +487,7 @@ public class WebSocketHandler
                 if (wavBytes.Length == 0)
                     continue;
 
-                if (!TryParsePcmWav(wavBytes, out var ttsWav) || ttsWav == null)
+                if (!_audio.TryParsePcmWav(wavBytes, out var ttsWav) || ttsWav == null)
                 {
                     _logger.LogWarning("TTS returned unsupported WAV format for sentence {Index}", sentenceIndex);
                     continue;
@@ -705,10 +531,10 @@ public class WebSocketHandler
                 }
 
                 // Apply tempo adjustment via ffmpeg if needed
-                var adjustedWav = await AdjustTempoAsync(wavBytes, tempo, allCts.Token);
+                var adjustedWav = await _audio.AdjustTempoAsync(wavBytes, tempo, allCts.Token);
                 
                 // Add silence padding to prevent audio device startup clipping
-                var paddedWav = AddSilencePadding(adjustedWav, paddingMs: 150);
+                var paddedWav = _audio.AddSilencePadding(adjustedWav, paddingMs: 150);
                 
                 // Calculate adjusted duration if tempo was applied (add padding time)
                 var adjustedDurationMs = tempo < 0.99f || tempo > 1.01f 
@@ -763,28 +589,6 @@ public class WebSocketHandler
         {
             _logger.LogInformation("⏱️ Full Response | Total time: {Ms}ms for {Count} sentence(s)",
                 ttfaTimer.ElapsedMilliseconds, sentenceIndex);
-        }
-    }
-    
-    /// <summary>
-    /// Estimate WAV audio duration from byte array.
-    /// Assumes standard WAV header and PCM format.
-    /// </summary>
-    private static int EstimateWavDurationMs(byte[] wavData)
-    {
-        if (wavData.Length < 44) return 0; // Too short for WAV header
-        
-        try
-        {
-            // WAV header: bytes 24-27 = sample rate, bytes 34-35 = bits per sample
-            // For simplicity, assume 24kHz 16-bit mono (common TTS output)
-            var dataSize = wavData.Length - 44; // Subtract header
-            var bytesPerSecond = 24000 * 2; // 24kHz * 16-bit = 48000 bytes/sec
-            return (int)(dataSize * 1000.0 / bytesPerSecond);
-        }
-        catch
-        {
-            return 0;
         }
     }
     
