@@ -121,17 +121,13 @@ public sealed class VoiceSession : IDisposable
         var audioBytes = audioData.Length;
         var audioSeconds = audioBytes / (double)_config.BytesPerSecond;
 
-        _logger.LogInformation("⏱️ STT Start | {Bytes} bytes ({AudioSec:F2}s audio)", audioBytes, audioSeconds);
-        
         var sttStart = _pipelineTimer.ElapsedMilliseconds;
         var transcription = await _whisper.TranscribeAsync(audioData);
         var sttMs = _pipelineTimer.ElapsedMilliseconds - sttStart;
+        var rtf = audioSeconds > 0 ? audioSeconds * 1000.0 / sttMs : 0;
 
-        _logger.LogInformation("⏱️ STT Done | {Ms}ms for {AudioSec:F2}s audio ({Rtf:F1}x realtime) -> \"{Text}\"",
-            sttMs,
-            audioSeconds,
-            audioSeconds > 0 ? audioSeconds * 1000.0 / sttMs : 0,
-            transcription.Length > 50 ? transcription[..50] + "..." : transcription);
+        _logger.LogInformation("STT: {AudioSec:F1}s audio -> {Ms}ms ({Rtf:F0}x RT)",
+            audioSeconds, sttMs, rtf);
 
         lock (_lock)
         {
@@ -214,14 +210,11 @@ public sealed class VoiceSession : IDisposable
             InputStateChanged?.Invoke(prev, _inputState);
         }
 
-        if (!string.IsNullOrEmpty(combinedText))
+        if (!string.IsNullOrEmpty(combinedText) && ResponseReady != null)
         {
-            _logger.LogInformation("HEARD: \"{Query}\"", combinedText);
-            
-            if (ResponseReady != null)
-            {
-                await ResponseReady.Invoke(combinedText, timer);
-            }
+            _logger.LogInformation("QUERY: \"{Query}\"", 
+                combinedText.Length > 80 ? combinedText[..80] + "..." : combinedText);
+            await ResponseReady.Invoke(combinedText, timer);
         }
     }
 

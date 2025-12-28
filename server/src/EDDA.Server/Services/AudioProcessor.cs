@@ -79,7 +79,7 @@ public class AudioProcessor : IAudioProcessor
             return wavBytes;
         
         // Calculate padding size in bytes
-        var bytesPerMs = (wav.SampleRate * wav.Channels * (wav.BitsPerSample / 8)) / 1000.0;
+        var bytesPerMs = (wav.SampleRate * wav.Channels * (wav.BitsPerSample / 8f)) / 1000.0;
         var paddingBytes = (int)(paddingMs * bytesPerMs);
         
         // Ensure even number of bytes for 16-bit audio
@@ -138,20 +138,18 @@ public class AudioProcessor : IAudioProcessor
         if (Math.Abs(tempo - 1.0f) < 0.01f)
             return wavBytes;
         
-        using var process = new Process
+        using var process = new Process();
+        process.StartInfo = new ProcessStartInfo
         {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "ffmpeg",
-                Arguments = $"-loglevel error -f wav -i pipe:0 -filter:a \"atempo={tempo:F3}\" -f wav pipe:1",
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
+            FileName = "ffmpeg",
+            Arguments = $"-loglevel error -f wav -i pipe:0 -filter:a \"atempo={tempo:F3}\" -f wav pipe:1",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
         };
-        
+
         process.Start();
         
         // All three streams must be handled concurrently to prevent deadlock:
