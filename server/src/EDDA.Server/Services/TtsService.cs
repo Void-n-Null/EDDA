@@ -12,15 +12,18 @@ namespace EDDA.Server.Services;
 public class TtsService : ITtsService, IDisposable
 {
     private HttpClient _httpClient;
+    private readonly HttpClient _healthCheckClient;
     private readonly TtsConfig _config;
     private readonly ILogger<TtsService> _logger;
     private readonly SemaphoreSlim _healthLock = new(1, 1);
     private readonly SemaphoreSlim _switchLock = new(1, 1);
+    private readonly SemaphoreSlim _endpointSelectLock = new(1, 1);
     
     private Timer? _healthCheckTimer;
     private CircuitState _circuitState = CircuitState.Closed;
     private int _consecutiveFailures;
     private DateTime _circuitOpenedAt;
+    private string? _lastLoggedEndpoint;
     
     // Circuit breaker states
     private enum CircuitState { Closed, Open, HalfOpen }
@@ -28,16 +31,29 @@ public class TtsService : ITtsService, IDisposable
     public bool IsHealthy { get; private set; }
     public string? LastHealthStatus { get; private set; }
     public TtsBackend ActiveBackend => _config.ActiveBackend;
+    public TtsConfig Config => _config;
     
     public TtsService(TtsConfig config, ILogger<TtsService> logger)
     {
         _config = config;
         _logger = logger;
         
+        // Fast HTTP client for endpoint health checks
+        _healthCheckClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromMilliseconds(config.EndpointHealthTimeoutMs)
+        };
+        
+        // Initialize with first endpoint (will be updated on first request)
+        _config.ActiveChatterboxEndpoint = config.ChatterboxEndpoints.FirstOrDefault();
         _httpClient = CreateHttpClient(config.ActiveUrl);
         
-        _logger.LogInformation("TTS Service configured: {Backend} @ {Url}", 
-            config.BackendName, config.ActiveUrl);
+        _logger.LogInformation("TTS Service configured: {Backend} with {Count} endpoints", 
+            config.BackendName, config.ChatterboxEndpoints.Count);
+        foreach (var ep in config.ChatterboxEndpoints.OrderBy(e => e.Priority))
+        {
+            _logger.LogInformation("  Priority {Priority}: {Name} @ {Url}", ep.Priority, ep.Name, ep.Url);
+        }
     }
     
     private HttpClient CreateHttpClient(string baseUrl)
@@ -111,7 +127,8 @@ public class TtsService : ITtsService, IDisposable
         float exaggeration = 0.5f,
         CancellationToken cancellationToken = default)
     {
-        return await GenerateSpeechWithVoiceAsync(text, null!, exaggeration, cancellationToken);
+        // Use configured voice reference (null = default "lucy" voice, path = voice cloning)
+        return await GenerateSpeechWithVoiceAsync(text, _config.VoiceReference, exaggeration, cancellationToken);
     }
     
     public async Task<byte[]> GenerateSpeechWithVoiceAsync(
@@ -120,6 +137,12 @@ public class TtsService : ITtsService, IDisposable
         float exaggeration = 0.5f,
         CancellationToken cancellationToken = default)
     {
+        // Select best available endpoint before each request (for Chatterbox)
+        if (_config.ActiveBackend == TtsBackend.Chatterbox)
+        {
+            await SelectBestEndpointAsync(cancellationToken);
+        }
+        
         // Check circuit breaker
         if (!CanMakeRequest())
         {
@@ -138,6 +161,85 @@ public class TtsService : ITtsService, IDisposable
         return await ExecuteWithRetryAsync(
             async ct => await SendTtsRequestAsync(request, ct),
             cancellationToken);
+    }
+    
+    /// <summary>
+    /// Select the best available Chatterbox endpoint (lowest priority number that responds).
+    /// Only logs when the active endpoint actually changes.
+    /// </summary>
+    private async Task SelectBestEndpointAsync(CancellationToken cancellationToken)
+    {
+        if (!await _endpointSelectLock.WaitAsync(0, cancellationToken))
+            return; // Another selection in progress, skip
+        
+        try
+        {
+            ChatterboxEndpoint? bestEndpoint = null;
+            
+            // Check endpoints in priority order
+            foreach (var endpoint in _config.ChatterboxEndpoints.OrderBy(e => e.Priority))
+            {
+                if (await IsEndpointHealthyAsync(endpoint.Url, cancellationToken))
+                {
+                    bestEndpoint = endpoint;
+                    break; // Found the highest priority healthy endpoint
+                }
+            }
+            
+            // Fall back to first endpoint if none responded (let normal error handling deal with it)
+            bestEndpoint ??= _config.ChatterboxEndpoints.FirstOrDefault();
+            
+            if (bestEndpoint == null)
+                return;
+            
+            // Check if endpoint changed
+            var currentEndpointUrl = _config.ActiveChatterboxEndpoint?.Url;
+            if (currentEndpointUrl != bestEndpoint.Url)
+            {
+                var oldName = _config.ActiveChatterboxEndpoint?.Name ?? "None";
+                _config.ActiveChatterboxEndpoint = bestEndpoint;
+                
+                // Recreate HTTP client for new endpoint
+                var oldClient = _httpClient;
+                _httpClient = CreateHttpClient(bestEndpoint.Url);
+                oldClient.Dispose();
+                
+                // Reset circuit breaker for new endpoint
+                _circuitState = CircuitState.Closed;
+                _consecutiveFailures = 0;
+                
+                // Only log actual switches (not initial selection or same endpoint)
+                if (_lastLoggedEndpoint != null && _lastLoggedEndpoint != bestEndpoint.Name)
+                {
+                    _logger.LogInformation("🔄 TTS endpoint switched: {Old} → {New} ({Url})",
+                        oldName, bestEndpoint.Name, bestEndpoint.Url);
+                }
+                _lastLoggedEndpoint = bestEndpoint.Name;
+            }
+        }
+        finally
+        {
+            _endpointSelectLock.Release();
+        }
+    }
+    
+    /// <summary>
+    /// Quick health check for endpoint selection (fast timeout, no logging).
+    /// </summary>
+    private async Task<bool> IsEndpointHealthyAsync(string url, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(_config.EndpointHealthTimeoutMs);
+            
+            var response = await _healthCheckClient.GetAsync($"{url}/health", cts.Token);
+            return response.IsSuccessStatusCode;
+        }
+        catch
+        {
+            return false;
+        }
     }
     
     private async Task<byte[]> SendTtsRequestAsync(TtsRequest request, CancellationToken cancellationToken)
@@ -335,8 +437,10 @@ public class TtsService : ITtsService, IDisposable
     {
         _healthCheckTimer?.Dispose();
         _httpClient.Dispose();
+        _healthCheckClient.Dispose();
         _healthLock.Dispose();
         _switchLock.Dispose();
+        _endpointSelectLock.Dispose();
     }
     
     // ========================================================================
