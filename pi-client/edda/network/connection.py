@@ -21,6 +21,7 @@ class MessageType(str, Enum):
     AUDIO_CACHE_PLAY = "audio_cache_play"  # Request to play cached audio
     AUDIO_CACHE_STORE = "audio_cache_store"  # Send audio to cache
     RESPONSE_COMPLETE = "response_complete"
+    STATUS = "status"  # Session status (active/inactive/deactivated)
 
 
 @dataclass
@@ -77,6 +78,12 @@ class AudioCacheStoreMessage:
 
 
 @dataclass
+class StatusMessage:
+    """Session status message from server."""
+    state: str  # "active", "inactive", "deactivated"
+
+
+@dataclass
 class ServerMessage:
     """Wrapper for messages received from server."""
     type: MessageType
@@ -87,6 +94,7 @@ class ServerMessage:
     cache_play: Optional[AudioCachePlayMessage] = None
     cache_store: Optional[AudioCacheStoreMessage] = None
     stream: Optional[str] = None
+    status: Optional[StatusMessage] = None
 
 
 class ServerConnection:
@@ -309,6 +317,12 @@ class ServerConnection:
             
             elif msg_type == MessageType.RESPONSE_COMPLETE.value:
                 return ServerMessage(type=MessageType.RESPONSE_COMPLETE)
+            
+            elif msg_type == MessageType.STATUS.value:
+                status_msg = StatusMessage(
+                    state=data.get("state", "unknown")
+                )
+                return ServerMessage(type=MessageType.STATUS, status=status_msg)
             
             else:
                 # Unknown message type - log and skip

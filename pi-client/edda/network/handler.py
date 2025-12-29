@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from .connection import (
     MessageType, ServerMessage,
-    AudioSentenceMessage, AudioCachePlayMessage, AudioCacheStoreMessage
+    AudioSentenceMessage, AudioCachePlayMessage, AudioCacheStoreMessage, StatusMessage
 )
 
 if TYPE_CHECKING:
@@ -63,6 +63,7 @@ class MessageHandler:
             MessageType.AUDIO_CACHE_PLAY: self._handle_cache_play,
             MessageType.AUDIO_CACHE_STORE: self._handle_cache_store,
             MessageType.RESPONSE_COMPLETE: self._handle_response_complete,
+            MessageType.STATUS: self._handle_status,
         }
         
         handler = handlers.get(msg.type)
@@ -244,6 +245,21 @@ class MessageHandler:
         if self._playback_event.is_set():
             print("[RECV] Response complete - resuming mic")
             self._playback_event.clear()
+    
+    async def _handle_status(self, msg: ServerMessage) -> None:
+        """Handle session status updates from server."""
+        status = msg.status
+        if status is None:
+            return
+        
+        # Just log for now - can add visual/audio feedback later
+        state = status.state
+        if state == "active":
+            print("[STATUS] Session activated - listening")
+        elif state == "inactive":
+            print("[STATUS] Inactive - waiting for wake word")
+        elif state == "deactivated":
+            print("[STATUS] Session deactivated - goodbye")
     
     # =========================================================================
     # Helpers
