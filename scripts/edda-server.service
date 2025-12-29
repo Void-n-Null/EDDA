@@ -10,6 +10,9 @@ ExecStart=/home/blake/edda-server/EDDA.Server/bin/Release/net8.0/EDDA.Server
 Restart=always
 RestartSec=3
 
+# Load API keys and secrets from .env (synced from dev machine, gitignored)
+EnvironmentFile=/home/blake/edda-server/.env
+
 # Environment for CUDA and Whisper
 Environment=PATH=/usr/local/cuda/bin:/usr/bin:/bin
 Environment=LD_LIBRARY_PATH=/home/blake/edda-server/EDDA.Server/bin/Release/net8.0:/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib
