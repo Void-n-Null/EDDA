@@ -28,6 +28,10 @@ public sealed class VoiceSession : IDisposable
     private CancellationTokenSource? _waitTimeoutCts;
     private Stopwatch? _pipelineTimer;
     private bool _disposed;
+    
+    // Activation state for wake word detection
+    private bool _isActive;
+    private DateTime? _activatedAt;
 
     /// <summary>
     /// Fired when the WaitingForMore timeout expires and we have transcriptions ready.
@@ -62,6 +66,53 @@ public sealed class VoiceSession : IDisposable
     public int QueuedTranscriptionCount
     {
         get { lock (_lock) return _transcriptionQueue.Count; }
+    }
+
+    /// <summary>
+    /// Whether the session is currently active (listening without wake word).
+    /// When inactive, only wake word triggers processing.
+    /// </summary>
+    public bool IsActive
+    {
+        get { lock (_lock) return _isActive; }
+    }
+
+    /// <summary>
+    /// When the session was last activated, if currently active.
+    /// </summary>
+    public DateTime? ActivatedAt
+    {
+        get { lock (_lock) return _activatedAt; }
+    }
+
+    /// <summary>
+    /// Activate the session. All subsequent speech will be processed without wake word check.
+    /// </summary>
+    public void Activate()
+    {
+        lock (_lock)
+        {
+            if (_isActive) return;
+            
+            _isActive = true;
+            _activatedAt = DateTime.UtcNow;
+            _logger.LogInformation("SESSION: Activated");
+        }
+    }
+
+    /// <summary>
+    /// Deactivate the session. Only wake word will trigger processing.
+    /// </summary>
+    public void Deactivate()
+    {
+        lock (_lock)
+        {
+            if (!_isActive) return;
+            
+            _isActive = false;
+            _activatedAt = null;
+            _logger.LogInformation("SESSION: Deactivated");
+        }
     }
 
     public VoiceSession(
@@ -240,6 +291,8 @@ public sealed class VoiceSession : IDisposable
             _inputState = InputState.Idle;
             _outputState = OutputState.Idle;
             _pipelineTimer = null;
+            _isActive = false;
+            _activatedAt = null;
         }
     }
 

@@ -11,11 +11,20 @@ namespace EDDA.Server.Handlers;
 public sealed class WebSocketMessageSink(WebSocket socket) : IMessageSink
 {
     public bool IsConnected => socket.State == WebSocketState.Open;
+    
     public async ValueTask SendAsync(object payload, CancellationToken ct = default)
     {
         if (!IsConnected) return;
         var json = JsonSerializer.Serialize(payload);
         var bytes = Encoding.UTF8.GetBytes(json);
         await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken: ct);
+    }
+    
+    /// <summary>
+    /// Send a status message to the client (e.g., "active", "inactive", "deactivated").
+    /// </summary>
+    public async ValueTask SendStatusAsync(string state, CancellationToken ct = default)
+    {
+        await SendAsync(new { type = "status", state }, ct);
     }
 }

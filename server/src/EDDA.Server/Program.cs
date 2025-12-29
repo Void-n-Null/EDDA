@@ -1,6 +1,7 @@
 ﻿using EDDA.Server.Handlers;
 using EDDA.Server.Models;
 using EDDA.Server.Services;
+using EDDA.Server.Services.Llm;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -10,9 +11,11 @@ var builder = WebApplication.CreateBuilder(args);
 
 var audioConfig = AudioConfig.FromEnvironment();
 var ttsConfig = TtsConfig.FromEnvironment();
+var openRouterConfig = OpenRouterConfig.FromEnvironment();
 
 builder.Services.AddSingleton(audioConfig);
 builder.Services.AddSingleton(ttsConfig);
+builder.Services.AddSingleton(openRouterConfig);
 
 // ============================================================================
 // Services
@@ -29,6 +32,22 @@ builder.Services.AddSingleton<IAudioProcessor, AudioProcessor>();
 
 // Response pipeline (TTS orchestration, sentence streaming)
 builder.Services.AddSingleton<IResponsePipeline, ResponsePipeline>();
+
+// LLM services (OpenRouter)
+builder.Services.AddSingleton<IOpenRouterService>(sp =>
+{
+    var config = sp.GetRequiredService<OpenRouterConfig>();
+    var logger = sp.GetRequiredService<ILogger<OpenRouterService>>();
+    return new OpenRouterService(config, logger);
+});
+
+// Wake word detection (LLM-based)
+builder.Services.AddSingleton<IWakeWordService>(sp =>
+{
+    var llm = sp.GetRequiredService<IOpenRouterService>();
+    var logger = sp.GetRequiredService<ILogger<WakeWordService>>();
+    return new WakeWordService(llm, logger);
+});
 
 // WebSocket handler
 builder.Services.AddTransient<WebSocketHandler>();
@@ -61,6 +80,10 @@ await whisper.InitializeAsync();
 var tts = app.Services.GetRequiredService<ITtsService>();
 await tts.InitializeAsync();
 
+// Initialize OpenRouter (LLM for wake word detection)
+var openRouter = app.Services.GetRequiredService<IOpenRouterService>();
+await openRouter.InitializeAsync();
+
 // Warm up response pipeline (loads embedded resources)
 _ = app.Services.GetRequiredService<IResponsePipeline>();
 
@@ -70,6 +93,7 @@ log.LogInformation("  STT: {Status}", whisper.IsInitialized ? "✓ Ready" : "✗
 log.LogInformation("  TTS: {Status} ({Backend})", 
     tts.IsHealthy ? "✓ Ready" : "✗ Unavailable", 
     ttsConfig.BackendName);
+log.LogInformation("  LLM: {Status} (wake word)", openRouter.IsInitialized ? "✓ Ready" : "✗ FAILED");
 
 if (!tts.IsHealthy)
 {
