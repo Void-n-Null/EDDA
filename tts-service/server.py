@@ -9,9 +9,11 @@ Endpoints:
   POST /tts        - Generate speech from text (returns WAV audio)
 """
 
+import asyncio
 import io
 import logging
 import os
+import random
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -69,6 +71,15 @@ class Config:
     # Model warmup
     WARMUP_TEXT: str = "Hello, this is a warmup test."
 
+    # Model loading retry settings
+    LOAD_MAX_RETRIES: int = int(os.getenv("TTS_LOAD_MAX_RETRIES", "10"))
+    LOAD_INITIAL_DELAY_S: float = float(os.getenv("TTS_LOAD_INITIAL_DELAY_S", "5"))
+    LOAD_MAX_DELAY_S: float = float(os.getenv("TTS_LOAD_MAX_DELAY_S", "120"))
+    LOAD_BACKOFF_MULTIPLIER: float = 2.0
+
+    # Background retry interval (if startup fails, keep trying)
+    BACKGROUND_RETRY_INTERVAL_S: int = int(os.getenv("TTS_BACKGROUND_RETRY_S", "60"))
+
 
 # ============================================================================
 # Model Singleton
@@ -88,6 +99,8 @@ class TTSModel:
         self.is_ready = False
         self.load_time_ms: float = 0
         self.last_error: Optional[str] = None
+        self._loading = False  # Prevent concurrent load attempts
+        self._background_retry_task: Optional[asyncio.Task] = None
     
     @classmethod
     def get_instance(cls) -> "TTSModel":
@@ -96,22 +109,27 @@ class TTSModel:
         return cls._instance
     
     def load(self) -> bool:
-        """Load the Chatterbox Turbo model."""
+        """Load the Chatterbox Turbo model (single attempt)."""
+        if self._loading:
+            logger.warning("Load already in progress, skipping")
+            return False
+
+        self._loading = True
         try:
             logger.info(f"Loading Chatterbox Turbo on device: {self.device}")
             start = time.perf_counter()
-            
+
             # Import and load Chatterbox Turbo (supports paralinguistic tags like [chuckle])
             from chatterbox.tts_turbo import ChatterboxTurboTTS
-            
+
             self.model = ChatterboxTurboTTS.from_pretrained(device=self.device)
-            
+
             self.load_time_ms = (time.perf_counter() - start) * 1000
             logger.info(f"Model loaded in {self.load_time_ms:.0f}ms")
-            
+
             # Verify model is actually on the expected device
             self._verify_device()
-            
+
             # Optional: torch.compile for faster inference (experimental)
             if Config.USE_TORCH_COMPILE:
                 logger.info("Compiling model with torch.compile() - this may take a minute...")
@@ -127,18 +145,107 @@ class TTSModel:
                     logger.info(f"Model compiled in {compile_ms:.0f}ms")
                 except Exception as e:
                     logger.warning(f"torch.compile failed (non-fatal): {e}")
-            
+
             # Warmup inference (first inference is always slower)
             self._warmup()
-            
+
             self.is_ready = True
             self.last_error = None
             return True
-            
+
         except Exception as e:
             self.last_error = str(e)
             logger.error(f"Failed to load model: {e}")
             return False
+        finally:
+            self._loading = False
+
+    def load_with_retry(self) -> bool:
+        """
+        Load the model with exponential backoff retry.
+
+        Retries up to LOAD_MAX_RETRIES times with exponential backoff.
+        Logs each attempt and the wait time before next retry.
+        """
+        if self.is_ready:
+            return True
+
+        delay = Config.LOAD_INITIAL_DELAY_S
+
+        for attempt in range(1, Config.LOAD_MAX_RETRIES + 1):
+            logger.info(f"Model load attempt {attempt}/{Config.LOAD_MAX_RETRIES}")
+
+            if self.load():
+                logger.info(f"✓ Model loaded successfully on attempt {attempt}")
+                return True
+
+            if attempt < Config.LOAD_MAX_RETRIES:
+                # Add jitter (±20%) to prevent thundering herd
+                jitter = delay * 0.2 * (random.random() * 2 - 1)
+                wait_time = min(delay + jitter, Config.LOAD_MAX_DELAY_S)
+
+                logger.warning(
+                    f"Model load failed (attempt {attempt}/{Config.LOAD_MAX_RETRIES}). "
+                    f"Retrying in {wait_time:.1f}s... Error: {self.last_error}"
+                )
+                time.sleep(wait_time)
+                delay = min(delay * Config.LOAD_BACKOFF_MULTIPLIER, Config.LOAD_MAX_DELAY_S)
+
+        logger.error(
+            f"✗ Model failed to load after {Config.LOAD_MAX_RETRIES} attempts. "
+            f"Last error: {self.last_error}"
+        )
+        return False
+
+    async def start_background_retry(self):
+        """
+        Start a background task that keeps trying to load the model.
+
+        Called when initial load fails. Continues retrying indefinitely
+        until the model loads successfully.
+        """
+        if self.is_ready:
+            return
+
+        if self._background_retry_task is not None:
+            logger.debug("Background retry already running")
+            return
+
+        async def retry_loop():
+            attempt = 0
+            while not self.is_ready:
+                attempt += 1
+                await asyncio.sleep(Config.BACKGROUND_RETRY_INTERVAL_S)
+
+                if self.is_ready:
+                    break
+
+                logger.info(f"Background model load attempt {attempt}...")
+
+                # Run blocking load in thread pool
+                success = await asyncio.get_running_loop().run_in_executor(None, self.load)
+
+                if success:
+                    logger.info(f"✓ Background model load succeeded on attempt {attempt}")
+                    break
+                else:
+                    logger.warning(
+                        f"Background model load failed (attempt {attempt}). "
+                        f"Will retry in {Config.BACKGROUND_RETRY_INTERVAL_S}s. "
+                        f"Error: {self.last_error}"
+                    )
+
+        self._background_retry_task = asyncio.create_task(retry_loop())
+        logger.info(
+            f"Started background model retry (interval: {Config.BACKGROUND_RETRY_INTERVAL_S}s)"
+        )
+
+    def stop_background_retry(self):
+        """Cancel the background retry task if running."""
+        if self._background_retry_task is not None:
+            self._background_retry_task.cancel()
+            self._background_retry_task = None
+            logger.info("Background retry task cancelled")
     
     def _verify_device(self):
         """Verify the model components are on the expected device."""
@@ -252,14 +359,22 @@ async def lifespan(app: FastAPI):
         logger.info(f"CUDA Device: {torch.cuda.get_device_name(0)}")
         logger.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     logger.info("=" * 60)
-    
+
     model = TTSModel.get_instance()
-    if not model.load():
-        logger.error("Model failed to load - service will return 503 on /tts")
-    
+
+    # Try loading with retries (blocks startup for up to ~10 min worst case)
+    if not model.load_with_retry():
+        logger.error(
+            "Model failed to load after all retries - starting background retry. "
+            "Service will return 503 on /tts until model loads."
+        )
+        # Start background task that keeps trying forever
+        await model.start_background_retry()
+
     yield
-    
+
     # Shutdown: Cleanup
+    model.stop_background_retry()
     logger.info("TTS Service shutting down")
 
 
