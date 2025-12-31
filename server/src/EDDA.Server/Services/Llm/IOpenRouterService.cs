@@ -19,6 +19,12 @@ public record ChatMessage
     /// <summary>Tool call ID this message is responding to (when role is "tool").</summary>
     public string? ToolCallId { get; init; }
 
+    /// <summary>
+    /// Reasoning details from Gemini 3 / Claude / OpenAI reasoning models.
+    /// MUST be preserved exactly as received and echoed back for multi-turn tool calls.
+    /// </summary>
+    public IReadOnlyList<ReasoningDetail>? ReasoningDetails { get; init; }
+
     public static ChatMessage System(string content) =>
         new() { Role = "system", Content = content };
 
@@ -28,8 +34,10 @@ public record ChatMessage
     public static ChatMessage Assistant(string content) =>
         new() { Role = "assistant", Content = content };
 
-    public static ChatMessage AssistantWithToolCalls(IReadOnlyList<ToolCall> toolCalls) =>
-        new() { Role = "assistant", ToolCalls = toolCalls };
+    public static ChatMessage AssistantWithToolCalls(
+        IReadOnlyList<ToolCall> toolCalls,
+        IReadOnlyList<ReasoningDetail>? reasoningDetails = null) =>
+        new() { Role = "assistant", ToolCalls = toolCalls, ReasoningDetails = reasoningDetails };
 
     public static ChatMessage Tool(string toolCallId, string content) =>
         new() { Role = "tool", ToolCallId = toolCallId, Content = content };
@@ -109,8 +117,32 @@ public record StreamChunk
     /// <summary>Finish reason (only on final chunk).</summary>
     public string? FinishReason { get; init; }
 
+    /// <summary>
+    /// Reasoning details from Gemini 3 / Claude / OpenAI reasoning models.
+    /// MUST be preserved and echoed back for multi-turn tool calls.
+    /// </summary>
+    public IReadOnlyList<ReasoningDetail>? ReasoningDetails { get; init; }
+
     /// <summary>Whether this is the final chunk.</summary>
     public bool IsFinal => FinishReason is not null;
+}
+
+/// <summary>
+/// Reasoning detail from reasoning models (Gemini 3, Claude 3.7+, OpenAI o-series).
+/// Must be preserved exactly as received and echoed back in subsequent requests.
+/// </summary>
+public record ReasoningDetail
+{
+    public required string Type { get; init; }
+    public string? Id { get; init; }
+    public string? Format { get; init; }
+    public int? Index { get; init; }
+
+    // Type-specific fields
+    public string? Summary { get; init; }      // for reasoning.summary
+    public string? Text { get; init; }         // for reasoning.text
+    public string? Signature { get; init; }    // for reasoning.text
+    public string? Data { get; init; }         // for reasoning.encrypted
 }
 
 /// <summary>
@@ -122,6 +154,11 @@ public record ToolCallDelta
     public string? Id { get; init; }
     public string? Name { get; init; }
     public string? ArgumentsDelta { get; init; }
+
+    /// <summary>
+    /// Gemini 3 thought signature - MUST be preserved and echoed back for multi-turn tool calls.
+    /// </summary>
+    public string? ThoughtSignature { get; init; }
 }
 
 /// <summary>

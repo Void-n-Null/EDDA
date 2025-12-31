@@ -110,10 +110,28 @@ public class OpenRouterService : IOpenRouterService, IDisposable
         ChatOptions? options = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var request = BuildRequest(messages, options, stream: true);
+        var messageList = messages.ToList();
+
+        // Log if we're sending back tool calls with reasoning_details
+        var toolCallMsgs = messageList.Where(m => m.ToolCalls is { Count: > 0 }).ToList();
+        if (toolCallMsgs.Count > 0)
+        {
+            var reasoningCount = toolCallMsgs.Sum(m => m.ReasoningDetails?.Count ?? 0);
+            _logger?.LogInformation(
+                "LLM: Request includes {ToolMsgs} assistant message(s) with tool calls, {ReasoningCount} reasoning_details preserved",
+                toolCallMsgs.Count, reasoningCount);
+        }
+
+        var request = BuildRequest(messageList, options, stream: true);
         var json = JsonSerializer.Serialize(request, JsonOptions);
 
-        _logger?.LogDebug("OpenRouter stream request: {Request}", json);
+        _logger?.LogInformation("LLM: Sending stream request ({Len} chars)", json.Length);
+
+        // Log the full request if it contains reasoning_details (for debugging)
+        if (json.Contains("reasoning_details"))
+        {
+            _logger?.LogDebug("LLM REQUEST WITH REASONING_DETAILS: {Json}", json);
+        }
 
         var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
         {
@@ -125,10 +143,17 @@ public class OpenRouterService : IOpenRouterService, IDisposable
             HttpCompletionOption.ResponseHeadersRead,
             ct);
 
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(ct);
+            _logger?.LogError("LLM STREAM ERROR: {Status} - {Body}", response.StatusCode, errorBody);
+            yield break;
+        }
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream);
+
+        var chunkCount = 0;
 
         while (!reader.EndOfStream && !ct.IsCancellationRequested)
         {
@@ -138,17 +163,23 @@ public class OpenRouterService : IOpenRouterService, IDisposable
                 continue;
 
             if (!line.StartsWith("data: "))
+            {
+                _logger?.LogWarning("LLM STREAM: Unexpected line: {Line}", line);
                 continue;
+            }
 
             var data = line[6..];
 
             if (data == "[DONE]")
+            {
+                _logger?.LogDebug("LLM STREAM: Complete after {Count} chunks", chunkCount);
                 yield break;
+            }
 
             StreamChunk? chunk;
             try
             {
-                chunk = ParseStreamChunk(data);
+                chunk = ParseStreamChunk(data, _logger);
             }
             catch (JsonException ex)
             {
@@ -157,8 +188,13 @@ public class OpenRouterService : IOpenRouterService, IDisposable
             }
 
             if (chunk is not null)
+            {
+                chunkCount++;
                 yield return chunk;
+            }
         }
+
+        _logger?.LogWarning("LLM STREAM: Reader ended without [DONE] after {Count} chunks", chunkCount);
     }
 
     public async Task<string> CompleteAsync(
@@ -250,21 +286,53 @@ public class OpenRouterService : IOpenRouterService, IDisposable
     {
         if (message.ToolCalls is { Count: > 0 })
         {
-            return new
+            // Build tool calls
+            var toolCallObjects = message.ToolCalls.Select(tc => new
             {
-                role = message.Role,
-                content = message.Content,
-                tool_calls = message.ToolCalls.Select(tc => new
+                id = tc.Id,
+                type = "function",
+                function = new
                 {
-                    id = tc.Id,
-                    type = "function",
-                    function = new
+                    name = tc.Name,
+                    arguments = tc.Arguments.GetRawText()
+                }
+            }).ToList();
+
+            // Build reasoning_details if present (required for Gemini 3 / Claude / OpenAI reasoning models)
+            object? reasoningDetailsObj = null;
+            if (message.ReasoningDetails is { Count: > 0 })
+            {
+                reasoningDetailsObj = message.ReasoningDetails.Select(rd =>
+                {
+                    var obj = new Dictionary<string, object?>
                     {
-                        name = tc.Name,
-                        arguments = tc.Arguments.GetRawText()
-                    }
-                })
+                        ["type"] = rd.Type
+                    };
+                    if (rd.Id != null) obj["id"] = rd.Id;
+                    if (rd.Format != null) obj["format"] = rd.Format;
+                    if (rd.Index != null) obj["index"] = rd.Index;
+                    if (rd.Summary != null) obj["summary"] = rd.Summary;
+                    if (rd.Text != null) obj["text"] = rd.Text;
+                    if (rd.Signature != null) obj["signature"] = rd.Signature;
+                    if (rd.Data != null) obj["data"] = rd.Data;
+                    return obj;
+                }).ToList();
+            }
+
+            // Use dictionary to conditionally include reasoning_details
+            var msgObj = new Dictionary<string, object?>
+            {
+                ["role"] = message.Role,
+                ["content"] = message.Content,
+                ["tool_calls"] = toolCallObjects
             };
+
+            if (reasoningDetailsObj != null)
+            {
+                msgObj["reasoning_details"] = reasoningDetailsObj;
+            }
+
+            return msgObj;
         }
 
         if (message.ToolCallId is not null)
@@ -357,11 +425,20 @@ public class OpenRouterService : IOpenRouterService, IDisposable
             foreach (var tc in toolCallsProp.EnumerateArray())
             {
                 var function = tc.GetProperty("function");
+
+                // Capture thought_signature for Gemini 3 models
+                string? thoughtSignature = null;
+                if (tc.TryGetProperty("thought_signature", out var thoughtSigProp))
+                {
+                    thoughtSignature = thoughtSigProp.GetString();
+                }
+
                 toolCalls.Add(new ToolCall
                 {
                     Id = tc.GetProperty("id").GetString()!,
                     Name = function.GetProperty("name").GetString()!,
-                    Arguments = JsonDocument.Parse(function.GetProperty("arguments").GetString()!).RootElement.Clone()
+                    Arguments = JsonDocument.Parse(function.GetProperty("arguments").GetString()!).RootElement.Clone(),
+                    ThoughtSignature = thoughtSignature
                 });
             }
         }
@@ -399,7 +476,7 @@ public class OpenRouterService : IOpenRouterService, IDisposable
         };
     }
 
-    private static StreamChunk? ParseStreamChunk(string json)
+    private static StreamChunk? ParseStreamChunk(string json, ILogger<OpenRouterService>? logger = null)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -417,6 +494,7 @@ public class OpenRouterService : IOpenRouterService, IDisposable
 
         string? contentDelta = null;
         List<ToolCallDelta>? toolCallDeltas = null;
+        List<ReasoningDetail>? reasoningDetails = null;
 
         if (choice.TryGetProperty("delta", out var delta))
         {
@@ -425,15 +503,26 @@ public class OpenRouterService : IOpenRouterService, IDisposable
                 contentDelta = contentProp.GetString();
             }
 
+            // Capture reasoning_details (required for Gemini 3 / Claude / OpenAI reasoning models)
+            if (delta.TryGetProperty("reasoning_details", out var reasoningProp) && reasoningProp.ValueKind == JsonValueKind.Array)
+            {
+                logger?.LogInformation("RAW REASONING_DETAILS: {Json}", reasoningProp.GetRawText());
+                reasoningDetails = ParseReasoningDetails(reasoningProp, logger);
+            }
+
             if (delta.TryGetProperty("tool_calls", out var toolCallsProp) && toolCallsProp.ValueKind == JsonValueKind.Array)
             {
                 toolCallDeltas = new List<ToolCallDelta>();
                 foreach (var tc in toolCallsProp.EnumerateArray())
                 {
-                    var tcd = new ToolCallDelta
+                    // Some models may not have 'index' - default to 0
+                    var index = 0;
+                    if (tc.TryGetProperty("index", out var indexProp))
                     {
-                        Index = tc.GetProperty("index").GetInt32()
-                    };
+                        index = indexProp.GetInt32();
+                    }
+
+                    var tcd = new ToolCallDelta { Index = index };
 
                     if (tc.TryGetProperty("id", out var idProp))
                         tcd = tcd with { Id = idProp.GetString() };
@@ -447,6 +536,16 @@ public class OpenRouterService : IOpenRouterService, IDisposable
                             tcd = tcd with { ArgumentsDelta = argsProp.GetString() };
                     }
 
+                    // Capture thought_signature if present (legacy/fallback)
+                    if (tc.TryGetProperty("thought_signature", out var thoughtSigProp))
+                    {
+                        tcd = tcd with { ThoughtSignature = thoughtSigProp.GetString() };
+                    }
+
+                    logger?.LogDebug(
+                        "PARSED TOOL DELTA: idx={Index}, id={Id}, name={Name}",
+                        tcd.Index, tcd.Id, tcd.Name);
+
                     toolCallDeltas.Add(tcd);
                 }
             }
@@ -456,8 +555,41 @@ public class OpenRouterService : IOpenRouterService, IDisposable
         {
             ContentDelta = contentDelta,
             ToolCallDeltas = toolCallDeltas,
+            ReasoningDetails = reasoningDetails,
             FinishReason = finishReason
         };
+    }
+
+    private static List<ReasoningDetail>? ParseReasoningDetails(JsonElement reasoningProp, ILogger<OpenRouterService>? logger)
+    {
+        var details = new List<ReasoningDetail>();
+
+        foreach (var item in reasoningProp.EnumerateArray())
+        {
+            var type = item.TryGetProperty("type", out var typeProp)
+                ? typeProp.GetString() ?? "unknown"
+                : "unknown";
+
+            var detail = new ReasoningDetail
+            {
+                Type = type,
+                Id = item.TryGetProperty("id", out var idProp) ? idProp.GetString() : null,
+                Format = item.TryGetProperty("format", out var formatProp) ? formatProp.GetString() : null,
+                Index = item.TryGetProperty("index", out var indexProp) ? indexProp.GetInt32() : null,
+                Summary = item.TryGetProperty("summary", out var summaryProp) ? summaryProp.GetString() : null,
+                Text = item.TryGetProperty("text", out var textProp) ? textProp.GetString() : null,
+                Signature = item.TryGetProperty("signature", out var sigProp) ? sigProp.GetString() : null,
+                Data = item.TryGetProperty("data", out var dataProp) ? dataProp.GetString() : null
+            };
+
+            logger?.LogDebug(
+                "PARSED REASONING: type={Type}, id={Id}, hasText={HasText}, hasSig={HasSig}",
+                detail.Type, detail.Id, detail.Text != null, detail.Signature != null);
+
+            details.Add(detail);
+        }
+
+        return details.Count > 0 ? details : null;
     }
 
     public void Dispose()

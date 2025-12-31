@@ -91,13 +91,13 @@ public record ToolResult
     /// </summary>
     public string ForLlm() => Status switch
     {
-        ToolResultStatus.Success => Data is string s ? s : JsonSerializer.Serialize(Data, JsonOptions),
-        ToolResultStatus.PartialSuccess => JsonSerializer.Serialize(new { partial = true, data = Data, error = ErrorMessage }, JsonOptions),
-        ToolResultStatus.Error => $"Error: {ErrorMessage ?? "Unknown error"}",
-        ToolResultStatus.Denied => "Permission denied",
-        ToolResultStatus.Timeout => "Tool execution timed out",
-        ToolResultStatus.RateLimited => $"Rate limited{(ErrorMessage is not null ? $": {ErrorMessage}" : "")}",
-        ToolResultStatus.InvalidInput => $"Invalid input: {ErrorMessage ?? "Unknown validation error"}",
+        ToolResultStatus.Success => $"[Success]: {(Data is string s ? s : JsonSerializer.Serialize(Data, JsonOptions))}",
+        ToolResultStatus.PartialSuccess => $"[Partial success]: {JsonSerializer.Serialize(new { partial = true, data = Data, error = ErrorMessage }, JsonOptions)}",
+        ToolResultStatus.Error => $"[Error]: {ErrorMessage ?? "Unknown error"}",
+        ToolResultStatus.Denied => "[Permission denied]",
+        ToolResultStatus.Timeout => "[Tool execution timed out]",
+        ToolResultStatus.RateLimited => $"[Rate limited]{(ErrorMessage is not null ? $": {ErrorMessage}" : "")}",
+        ToolResultStatus.InvalidInput => $"[Invalid input]: {ErrorMessage ?? "Unknown validation error"}",
         _ => throw new UnreachableException($"Unknown status: {Status}")
     };
 

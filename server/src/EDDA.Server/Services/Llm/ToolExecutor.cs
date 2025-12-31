@@ -17,6 +17,13 @@ public record ToolCall
 
     /// <summary>Arguments as JSON.</summary>
     public required JsonElement Arguments { get; init; }
+
+    /// <summary>
+    /// Gemini 3 thought signature - MUST be preserved and echoed back for multi-turn tool calls.
+    /// Without this, Gemini 3 will reject the follow-up request with:
+    /// "Function call is missing a thought_signature in functionCall parts"
+    /// </summary>
+    public string? ThoughtSignature { get; init; }
 }
 
 /// <summary>
