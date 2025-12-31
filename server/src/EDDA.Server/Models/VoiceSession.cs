@@ -1,12 +1,14 @@
 using System.Diagnostics;
+using EDDA.Server.Agent;
 using EDDA.Server.Services;
+using EDDA.Server.Services.Memory;
 
 namespace EDDA.Server.Models;
 
 /// <summary>
 /// Encapsulates all state for a single voice interaction session.
 /// Manages the input pipeline (STT) and will manage the output pipeline (LLM + TTS) in the future.
-/// 
+///
 /// Design notes:
 /// - Fully self-contained: no static state, can be instantiated per-connection
 /// - Thread-safe: internal lock protects state transitions
@@ -18,20 +20,23 @@ public sealed class VoiceSession : IDisposable
     private readonly IWhisperService _whisper;
     private readonly AudioConfig _config;
     private readonly ILogger _logger;
-    
+    private readonly IConversationMemory? _memory;
+
     private readonly object _lock = new();
     private readonly List<string> _transcriptionQueue = [];
     private readonly MemoryStream _audioBuffer = new();
-    
+
     private InputState _inputState = InputState.Idle;
     private OutputState _outputState = OutputState.Idle;
     private CancellationTokenSource? _waitTimeoutCts;
     private Stopwatch? _pipelineTimer;
     private bool _disposed;
-    
+
     // Activation state for wake word detection
     private bool _isActive;
     private DateTime? _activatedAt;
+    private Conversation? _currentConversation;
+    private bool _deactivationRequested;
 
     /// <summary>
     /// Fired when the WaitingForMore timeout expires and we have transcriptions ready.
@@ -78,6 +83,27 @@ public sealed class VoiceSession : IDisposable
     }
 
     /// <summary>
+    /// Whether a tool or system requested deactivation after the current response completes.
+    /// </summary>
+    public bool IsDeactivationRequested
+    {
+        get { lock (_lock) return _deactivationRequested; }
+    }
+
+    /// <summary>
+    /// Request deactivation at the end of the current response.
+    /// This does NOT dispose the current conversation immediately (safe for in-flight agent work).
+    /// </summary>
+    public void RequestDeactivation()
+    {
+        lock (_lock)
+        {
+            if (!_isActive) return;
+            _deactivationRequested = true;
+        }
+    }
+
+    /// <summary>
     /// When the session was last activated, if currently active.
     /// </summary>
     public DateTime? ActivatedAt
@@ -86,31 +112,57 @@ public sealed class VoiceSession : IDisposable
     }
 
     /// <summary>
+    /// The current conversation for this activation cycle.
+    /// Null when session is inactive. Created fresh on each activation.
+    /// </summary>
+    public Conversation? CurrentConversation
+    {
+        get { lock (_lock) return _currentConversation; }
+    }
+
+    /// <summary>
     /// Activate the session. All subsequent speech will be processed without wake word check.
+    /// Creates a fresh Conversation for this activation cycle.
     /// </summary>
     public void Activate()
     {
         lock (_lock)
         {
             if (_isActive) return;
-            
+
             _isActive = true;
             _activatedAt = DateTime.UtcNow;
-            _logger.LogInformation("SESSION: Activated");
+            _deactivationRequested = false;
+            // Pass memory service to conversation for persistence on dispose
+            _currentConversation = new Conversation(_memory, _logger);
+
+            _logger.LogInformation("SESSION: Activated (conversation {Id})",
+                _currentConversation.Id.ToString("N")[..8]);
         }
     }
 
     /// <summary>
     /// Deactivate the session. Only wake word will trigger processing.
+    /// Disposes the current Conversation (triggers future RAG storage).
     /// </summary>
     public void Deactivate()
     {
         lock (_lock)
         {
             if (!_isActive) return;
-            
+
             _isActive = false;
             _activatedAt = null;
+            _deactivationRequested = false;
+
+            // Log conversation summary before disposal
+            if (_currentConversation != null)
+            {
+                _logger.LogInformation("SESSION: {Summary}", _currentConversation.GetSummary());
+                _currentConversation.Dispose();
+                _currentConversation = null;
+            }
+
             _logger.LogInformation("SESSION: Deactivated");
         }
     }
@@ -118,11 +170,13 @@ public sealed class VoiceSession : IDisposable
     public VoiceSession(
         IWhisperService whisper,
         AudioConfig config,
-        ILogger logger)
+        ILogger logger,
+        IConversationMemory? memory = null)
     {
         _whisper = whisper;
         _config = config;
         _logger = logger;
+        _memory = memory;
     }
 
     /// <summary>
@@ -132,7 +186,7 @@ public sealed class VoiceSession : IDisposable
     public async Task HandleAudioChunkAsync(byte[] audioData)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        
+
         await _audioBuffer.WriteAsync(audioData);
 
         lock (_lock)
@@ -141,10 +195,10 @@ public sealed class VoiceSession : IDisposable
             {
                 var prev = _inputState;
                 _inputState = InputState.Listening;
-                
+
                 // Cancel any pending timeout (user started speaking again)
                 _waitTimeoutCts?.Cancel();
-                
+
                 _logger.LogDebug("INPUT: {Prev} -> Listening", prev);
                 InputStateChanged?.Invoke(prev, _inputState);
             }
@@ -158,13 +212,13 @@ public sealed class VoiceSession : IDisposable
     public async Task HandleEndSpeechAsync()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        
+
         if (_audioBuffer.Length == 0)
             return;
 
         // Start pipeline timer when user finishes speaking
         _pipelineTimer = Stopwatch.StartNew();
-        
+
         // Extract audio and reset buffer
         var audioData = _audioBuffer.ToArray();
         _audioBuffer.SetLength(0);
@@ -188,12 +242,12 @@ public sealed class VoiceSession : IDisposable
             }
 
             var prev = _inputState;
-            
+
             if (_transcriptionQueue.Count > 0)
             {
                 _inputState = InputState.WaitingForMore;
                 _logger.LogDebug("INPUT: {Prev} -> WaitingForMore (queued: {Count})", prev, _transcriptionQueue.Count);
-                
+
                 // Start the timeout - event-driven, not polling!
                 StartWaitTimeout();
             }
@@ -202,7 +256,7 @@ public sealed class VoiceSession : IDisposable
                 _inputState = InputState.Idle;
                 _logger.LogDebug("INPUT: {Prev} -> Idle (empty transcription, queue empty)", prev);
             }
-            
+
             if (prev != _inputState)
                 InputStateChanged?.Invoke(prev, _inputState);
         }
@@ -217,17 +271,17 @@ public sealed class VoiceSession : IDisposable
         // Cancel any existing timeout
         _waitTimeoutCts?.Cancel();
         _waitTimeoutCts = new CancellationTokenSource();
-        
+
         var token = _waitTimeoutCts.Token;
         var timer = _pipelineTimer;
-        
+
         // Fire-and-forget the timeout task
         _ = Task.Run(async () =>
         {
             try
             {
                 await Task.Delay((int)_config.WaitingForMoreTimeoutMs, token);
-                
+
                 // Timeout expired naturally - process the queue
                 await OnWaitTimeoutExpiredAsync(timer);
             }
@@ -245,25 +299,25 @@ public sealed class VoiceSession : IDisposable
     private async Task OnWaitTimeoutExpiredAsync(Stopwatch? timer)
     {
         string? combinedText = null;
-        
+
         lock (_lock)
         {
             if (_inputState != InputState.WaitingForMore || _transcriptionQueue.Count == 0)
                 return;
-            
+
             combinedText = string.Join(" ", _transcriptionQueue).Trim();
             _transcriptionQueue.Clear();
-            
+
             var prev = _inputState;
             _inputState = InputState.Idle;
-            
+
             _logger.LogDebug("INPUT: {Prev} -> Idle (timeout, firing response)", prev);
             InputStateChanged?.Invoke(prev, _inputState);
         }
 
         if (!string.IsNullOrEmpty(combinedText) && ResponseReady != null)
         {
-            _logger.LogInformation("QUERY: \"{Query}\"", 
+            _logger.LogInformation("QUERY: \"{Query}\"",
                 combinedText.Length > 80 ? combinedText[..80] + "..." : combinedText);
             await ResponseReady.Invoke(combinedText, timer);
         }
@@ -293,6 +347,9 @@ public sealed class VoiceSession : IDisposable
             _pipelineTimer = null;
             _isActive = false;
             _activatedAt = null;
+            _deactivationRequested = false;
+            _currentConversation?.Dispose();
+            _currentConversation = null;
         }
     }
 
@@ -300,9 +357,10 @@ public sealed class VoiceSession : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        
+
         _waitTimeoutCts?.Cancel();
         _waitTimeoutCts?.Dispose();
         _audioBuffer.Dispose();
+        _currentConversation?.Dispose();
     }
 }
