@@ -44,6 +44,8 @@ services:
       # Mount voice reference files (for voice cloning)
       # :z enables SELinux shared label for container access
       - ../voices:/app/voices:ro,z
+      # Persist uploaded voice cache across container restarts
+      - tts-voice-cache:/tmp/edda-voice-cache
     deploy:
       resources:
         reservations:
@@ -118,6 +120,8 @@ services:
 
 volumes:
   qdrant-data:
+    driver: local
+  tts-voice-cache:
     driver: local
 
 networks:

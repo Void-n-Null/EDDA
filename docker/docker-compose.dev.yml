@@ -32,6 +32,7 @@ services:
       - HF_TOKEN=${HF_TOKEN}  # Required for Chatterbox Turbo
     volumes:
       - ../voices:/app/voices:ro
+      - tts-voice-cache:/tmp/edda-voice-cache  # Persist uploaded voice references
     deploy:
       resources:
         reservations:
@@ -51,6 +52,10 @@ services:
       options:
         max-size: "50m"
         max-file: "3"
+
+volumes:
+  tts-voice-cache:
+    driver: local
 
 networks:
   default:
