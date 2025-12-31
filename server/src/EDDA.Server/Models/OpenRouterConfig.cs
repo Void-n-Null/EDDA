@@ -19,7 +19,11 @@ public class OpenRouterConfig
     /// Default model to use for chat completions.
     /// Format: "provider/model" (e.g., "anthropic/claude-sonnet-4", "openai/gpt-4o").
     /// </summary>
-    public string DefaultModel { get; init; } = "anthropic/claude-sonnet-4";
+    /// <summary>
+    /// DO NOT CHANGE THIS MODEL WITHOUT EXPLICIT USER APPROVAL.
+    /// Gemini 3 Flash is the intentional choice - it's fast, cheap, and good.
+    /// </summary>
+    public string DefaultModel { get; init; } = "google/gemini-3-flash-preview";
 
     /// <summary>
     /// Model to use for fast, cheap operations (e.g., wake word detection).
@@ -84,7 +88,7 @@ public class OpenRouterConfig
         {
             ApiKey = apiKey,
             BaseUrl = ParseStringEnv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/"),
-            DefaultModel = ParseStringEnv("OPENROUTER_DEFAULT_MODEL", "anthropic/claude-sonnet-4"),
+            DefaultModel = ParseStringEnv("OPENROUTER_DEFAULT_MODEL", "google/gemini-3-flash-preview"),
             FastModel = ParseStringEnv("OPENROUTER_FAST_MODEL", "anthropic/claude-haiku-4.5"),
             MaxTokens = ParseIntEnv("OPENROUTER_MAX_TOKENS", 4096),
             Temperature = ParseFloatEnv("OPENROUTER_TEMPERATURE", 0.7f),
