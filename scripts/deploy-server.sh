@@ -30,12 +30,13 @@ rsync -avz --delete \
   --exclude 'obj/' \
   --exclude '.git/' \
   --exclude 'models/' \
-  --exclude 'voices/' \
   --exclude 'docker/' \
   --exclude 'tts-service/' \
   --exclude 'piper-service/' \
   --exclude '.env' \
   server/src/ $SERVER_HOST:$SERVER_DIR/
+
+# Voice files are now embedded resources - no need to sync
 
 echo "Building on server..."
 ssh $SERVER_HOST "cd $SERVER_DIR && dotnet build EDDA.sln --configuration Release"

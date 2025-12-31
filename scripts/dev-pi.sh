@@ -35,6 +35,12 @@ rsync -avz --delete \
 echo "--- Installing Python dependencies..."
 ssh $PI_HOST "cd $PI_DIR && ./venv/bin/pip install --upgrade -r requirements.txt"
 
+# Install systemd service (always, in case it changed)
+echo "--- Installing systemd service..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+scp "$SCRIPT_DIR/edda-client.service" $PI_HOST:/tmp/
+ssh $PI_HOST "sudo mv /tmp/edda-client.service /etc/systemd/system/ && sudo systemctl daemon-reload"
+
 # Restart via systemd
 echo "--- Restarting edda-client service..."
 ssh $PI_HOST "sudo systemctl restart edda-client"
@@ -42,5 +48,6 @@ ssh $PI_HOST "sudo systemctl restart edda-client"
 # Tail logs
 echo "------------------------------------------------"
 echo "Streaming logs (Ctrl+C to stop)..."
+echo "TIP: File logs at $PI_DIR/logs/edda-client.log"
 echo ""
 ssh $PI_HOST "journalctl -u edda-client -f --no-hostname -o cat"

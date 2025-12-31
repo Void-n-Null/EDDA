@@ -1,0 +1,33 @@
+[Unit]
+Description=EDDA Voice Client
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=blake
+WorkingDirectory=/home/blake/edda-voice-client
+ExecStart=/home/blake/edda-voice-client/venv/bin/python3 -u client.py
+Restart=always
+RestartSec=5
+
+# Logging configuration
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edda-client
+
+# Capture all output, including crashes
+# -u ensures unbuffered Python output
+Environment=PYTHONUNBUFFERED=1
+
+# Kill entire process group on stop (clean shutdown)
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# Resource limits to prevent OOM silent crashes
+# Pi 5 has 8GB RAM, limit client to 1GB (way more than it needs)
+MemoryMax=1G
+MemoryHigh=768M
+
+[Install]
+WantedBy=multi-user.target

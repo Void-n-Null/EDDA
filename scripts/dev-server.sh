@@ -26,12 +26,13 @@ rsync -avz --delete \
   --exclude 'obj/' \
   --exclude '.git/' \
   --exclude 'models/' \
-  --exclude 'voices/' \
   --exclude 'docker/' \
   --exclude 'tts-service/' \
   --exclude 'piper-service/' \
   --exclude '.env' \
   server/src/ $SERVER_HOST:$SERVER_DIR/ 2>&1 | grep -v "WARNING: connection"
+
+# Voice files are now embedded resources - no need to sync
 
 # Build
 echo "Building..."

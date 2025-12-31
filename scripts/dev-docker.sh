@@ -23,6 +23,21 @@ rsync -av --delete \
     "$PROJECT_ROOT/docker/" \
     "$SERVER_HOST:$SERVER_DIR/docker/" 2>&1 | grep -v "^$"
 
+# Sync .env file if it exists (required for HF_TOKEN)
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    echo "       Syncing .env file..."
+    rsync -av \
+        "$PROJECT_ROOT/.env" \
+        "$SERVER_HOST:$SERVER_DIR/docker/.env" 2>&1 | grep -v "^$"
+elif [ -f "$PROJECT_ROOT/docker/.env" ]; then
+    echo "       Syncing docker/.env file..."
+    rsync -av \
+        "$PROJECT_ROOT/docker/.env" \
+        "$SERVER_HOST:$SERVER_DIR/docker/.env" 2>&1 | grep -v "^$"
+else
+    echo "       WARNING: No .env file found. HF_TOKEN may not be available."
+fi
+
 # Sync Chatterbox TTS service
 echo "[2/4] Syncing Chatterbox TTS service..."
 ssh $SERVER_HOST "mkdir -p $SERVER_DIR/tts-service"
