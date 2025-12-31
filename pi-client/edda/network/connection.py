@@ -22,6 +22,7 @@ class MessageType(str, Enum):
     AUDIO_CACHE_STORE = "audio_cache_store"  # Send audio to cache
     RESPONSE_COMPLETE = "response_complete"
     STATUS = "status"  # Session status (active/inactive/deactivated)
+    SET_VOLUME = "set_volume"  # Volume control command
 
 
 @dataclass
@@ -84,6 +85,13 @@ class StatusMessage:
 
 
 @dataclass
+class VolumeMessage:
+    """Volume control message from server."""
+    volume: int  # 0-100 percentage
+    relative: bool = False  # If True, volume is a delta (+/- from current)
+
+
+@dataclass
 class ServerMessage:
     """Wrapper for messages received from server."""
     type: MessageType
@@ -95,18 +103,19 @@ class ServerMessage:
     cache_store: Optional[AudioCacheStoreMessage] = None
     stream: Optional[str] = None
     status: Optional[StatusMessage] = None
+    volume: Optional[VolumeMessage] = None
 
 
 class ServerConnection:
     """
     Manages WebSocket connection to the EDDA server.
-    
+
     Handles:
     - Connection lifecycle
     - Message sending (audio chunks, end speech)
     - Message receiving with parsing
     - Automatic reconnection is handled at the orchestration level
-    
+
     Usage:
         conn = ServerConnection(url)
         async with conn.connect() as ws:
@@ -115,27 +124,27 @@ class ServerConnection:
                 if msg.type == MessageType.AUDIO_PLAYBACK:
                     play(msg.audio.data)
     """
-    
+
     def __init__(self, server_url: str):
         """
         Initialize the connection.
-        
+
         Args:
             server_url: WebSocket URL (e.g., ws://10.0.0.176:8080/ws)
         """
         self.server_url = server_url
         self._websocket: Optional[websockets.WebSocketClientProtocol] = None
-    
+
     @property
     def is_connected(self) -> bool:
         """Check if currently connected."""
         return self._websocket is not None and self._websocket.open
-    
+
     def connect(self):
         """
         Connect to the server.
         Returns a context manager for the connection.
-        
+
         Usage:
             async with conn.connect() as ws:
                 ...
@@ -143,15 +152,15 @@ class ServerConnection:
         print(f"Connecting to {self.server_url}...")
         # max_size=4MB to handle large audio messages (loading audio, TTS chunks)
         return websockets.connect(self.server_url, max_size=4 * 1024 * 1024)
-    
+
     async def send_audio_chunk(self, websocket, audio_data: bytes) -> bool:
         """
         Send an audio chunk to the server.
-        
+
         Args:
             websocket: Active WebSocket connection
             audio_data: Raw PCM audio bytes
-            
+
         Returns:
             True if sent successfully, False otherwise
         """
@@ -167,14 +176,14 @@ class ServerConnection:
         except Exception as e:
             print(f"[ERROR] Failed to send audio chunk: {e}")
             return False
-    
+
     async def send_end_speech(self, websocket) -> bool:
         """
         Signal end of speech to the server.
-        
+
         Args:
             websocket: Active WebSocket connection
-            
+
         Returns:
             True if sent successfully, False otherwise
         """
@@ -188,16 +197,16 @@ class ServerConnection:
         except Exception as e:
             print(f"[ERROR] Failed to send end_speech: {e}")
             return False
-    
+
     async def send_cache_status(self, websocket, cache_key: str, status: str) -> bool:
         """
         Send cache status to the server.
-        
+
         Args:
             websocket: Active WebSocket connection
             cache_key: The cache key being queried
             status: "have" if cached, "need" if not cached
-            
+
         Returns:
             True if sent successfully, False otherwise
         """
@@ -212,17 +221,17 @@ class ServerConnection:
         except Exception as e:
             print(f"[ERROR] Failed to send cache_status: {e}")
             return False
-    
+
     async def receive_messages(self, websocket) -> AsyncGenerator[ServerMessage, None]:
         """
         Async generator that yields parsed messages from the server.
-        
+
         Args:
             websocket: Active WebSocket connection
-            
+
         Yields:
             ServerMessage objects
-            
+
         Raises:
             websockets.exceptions.ConnectionClosed: When connection closes
         """
@@ -230,21 +239,21 @@ class ServerConnection:
             message = self._parse_message(raw_message)
             if message is not None:
                 yield message
-    
+
     def _parse_message(self, raw_message: str) -> Optional[ServerMessage]:
         """
         Parse a raw message from the server.
-        
+
         Args:
             raw_message: JSON string from WebSocket
-            
+
         Returns:
             Parsed ServerMessage or None if invalid/unknown
         """
         try:
             data = json.loads(raw_message)
             msg_type = data.get("type")
-            
+
             if msg_type == MessageType.AUDIO_PLAYBACK.value:
                 audio_data = base64.b64decode(data["data"])
                 audio_msg = AudioPlaybackMessage(
@@ -253,7 +262,7 @@ class ServerConnection:
                     total_chunks=data.get("total_chunks", 1)
                 )
                 return ServerMessage(type=MessageType.AUDIO_PLAYBACK, audio=audio_msg)
-            
+
             elif msg_type == MessageType.AUDIO_LOADING.value:
                 # Loading audio - same structure but different type (can be interrupted)
                 audio_data = base64.b64decode(data["data"])
@@ -284,7 +293,7 @@ class ServerConnection:
 
             elif msg_type == MessageType.AUDIO_STREAM_END.value:
                 return ServerMessage(type=MessageType.AUDIO_STREAM_END, stream=data.get("stream", ""))
-            
+
             elif msg_type == MessageType.AUDIO_SENTENCE.value:
                 wav_data = base64.b64decode(data["data"])
                 sentence_msg = AudioSentenceMessage(
@@ -296,14 +305,14 @@ class ServerConnection:
                     tempo_applied=float(data.get("tempo_applied", 1.0)),
                 )
                 return ServerMessage(type=MessageType.AUDIO_SENTENCE, audio_sentence=sentence_msg)
-            
+
             elif msg_type == MessageType.AUDIO_CACHE_PLAY.value:
                 cache_play_msg = AudioCachePlayMessage(
                     cache_key=data.get("cache_key", ""),
                     loop=bool(data.get("loop", False))
                 )
                 return ServerMessage(type=MessageType.AUDIO_CACHE_PLAY, cache_play=cache_play_msg)
-            
+
             elif msg_type == MessageType.AUDIO_CACHE_STORE.value:
                 wav_data = base64.b64decode(data["data"])
                 cache_store_msg = AudioCacheStoreMessage(
@@ -314,21 +323,28 @@ class ServerConnection:
                     duration_ms=int(data.get("duration_ms", 0))
                 )
                 return ServerMessage(type=MessageType.AUDIO_CACHE_STORE, cache_store=cache_store_msg)
-            
+
             elif msg_type == MessageType.RESPONSE_COMPLETE.value:
                 return ServerMessage(type=MessageType.RESPONSE_COMPLETE)
-            
+
             elif msg_type == MessageType.STATUS.value:
                 status_msg = StatusMessage(
                     state=data.get("state", "unknown")
                 )
                 return ServerMessage(type=MessageType.STATUS, status=status_msg)
-            
+
+            elif msg_type == MessageType.SET_VOLUME.value:
+                volume_msg = VolumeMessage(
+                    volume=int(data.get("volume", 50)),
+                    relative=bool(data.get("relative", False))
+                )
+                return ServerMessage(type=MessageType.SET_VOLUME, volume=volume_msg)
+
             else:
                 # Unknown message type - log and skip
                 print(f"[WARN] Unknown message type: {msg_type}")
                 return None
-                
+
         except json.JSONDecodeError:
             print(f"[WARN] Received non-JSON message: {raw_message[:100]}")
             return None
