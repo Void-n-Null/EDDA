@@ -2,19 +2,26 @@ using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using EDDA.Server.Agent;
 using EDDA.Server.Models;
 using EDDA.Server.Services;
+using EDDA.Server.Services.Memory;
+using EDDA.Server.Services.Session;
 
 namespace EDDA.Server.Handlers;
 
 /// <summary>
 /// Handles WebSocket connections for voice interaction.
-/// Thin coordinator: delegates to VoiceSession for state and ResponsePipeline for output.
+/// Thin coordinator: delegates to VoiceSession for state, Agent for AI, and ResponsePipeline for TTS.
 /// </summary>
 public class WebSocketHandler(
     IWhisperService whisper,
     IWakeWordService wakeWord,
+    IAgent agent,
     IResponsePipeline pipeline,
+    IConversationMemory memory,
+    IVoiceSessionAccessor sessions,
+    IMessageSinkAccessor sinks,
     AudioConfig config,
     ILogger<WebSocketHandler> logger)
 {
@@ -22,21 +29,22 @@ public class WebSocketHandler(
     public async Task HandleConnectionAsync(WebSocket webSocket)
     {
         logger.LogInformation("Client connected");
-        
+
         // Create session - encapsulates all state for this connection
-        using var session = new VoiceSession(whisper, config, logger);
-        
+        // Pass memory service so conversations persist exchanges on dispose
+        using var session = new VoiceSession(whisper, config, logger, memory);
+
         // Create message sink for this connection
         var sink = new WebSocketMessageSink(webSocket);
-        
+
         // Wire up the response handler - fires when user finishes speaking and timeout expires
         session.ResponseReady += async (transcription, pipelineTimer) =>
         {
             await HandleTranscriptionAsync(session, sink, transcription, pipelineTimer);
         };
-        
+
         var buffer = new byte[1024 * 16];
-        
+
         try
         {
             await ListenToConnection(webSocket, buffer, session);
@@ -50,7 +58,7 @@ public class WebSocketHandler(
         {
             logger.LogError(ex, "Connection error");
         }
-        
+
         logger.LogInformation("Client disconnected");
     }
 
@@ -70,7 +78,7 @@ public class WebSocketHandler(
             {
                 session.Deactivate();
                 await sink.SendStatusAsync("deactivated");
-                
+
                 // Send farewell message
                 var farewell = "Okay, I'll be here if you need me.";
                 await pipeline.StreamResponseAsync(sink, farewell, pipelineTimer);
@@ -83,38 +91,38 @@ public class WebSocketHandler(
             }
             return;
         }
-        
-        // If active, process directly
-        if (session.IsActive)
+
+        // If active, process with agent
+        if (session.IsActive && session.CurrentConversation != null)
         {
-            await EchoResponse(pipelineTimer, transcription, sink);
+            await ProcessWithAgentAsync(session, sink, transcription, pipelineTimer);
             return;
         }
-        
+
         // Inactive mode - check for wake word
         logger.LogDebug("Inactive mode, checking for wake word: \"{Text}\"",
             transcription.Length > 50 ? transcription[..50] + "..." : transcription);
-        
+
         var isWakeWord = await wakeWord.IsWakeWordAsync(transcription);
-        
+
         if (!isWakeWord)
         {
             logger.LogDebug("Not wake word, discarding");
             await sink.SendStatusAsync("inactive");
             return;
         }
-        
+
         // Wake word detected - activate and process
         logger.LogInformation("Wake word detected, activating session");
         session.Activate();
         await sink.SendStatusAsync("active");
-        
+
         // Strip the wake word from the transcription before processing
         var strippedText = StripWakeWord(transcription);
-        
-        if (!string.IsNullOrWhiteSpace(strippedText))
+
+        if (!string.IsNullOrWhiteSpace(strippedText) && session.CurrentConversation != null)
         {
-            await EchoResponse(pipelineTimer, strippedText, sink);
+            await ProcessWithAgentAsync(session, sink, strippedText, pipelineTimer);
         }
         else
         {
@@ -123,7 +131,70 @@ public class WebSocketHandler(
             await pipeline.StreamResponseAsync(sink, greeting, pipelineTimer);
         }
     }
-    
+
+    /// <summary>
+    /// Process user message through the agent and stream TTS for each sentence.
+    /// Uses the streaming API to play loading audio until first sentence, then stream sentences.
+    /// </summary>
+    private async Task ProcessWithAgentAsync(
+        VoiceSession session,
+        WebSocketMessageSink sink,
+        string userMessage,
+        Stopwatch? pipelineTimer)
+    {
+        if (session.CurrentConversation == null)
+        {
+            logger.LogWarning("ProcessWithAgentAsync called without active conversation");
+            return;
+        }
+
+        // Start streaming (plays loading audio)
+        var streamContext = await pipeline.BeginStreamingAsync(sink, pipelineTimer);
+
+        try
+        {
+            // Make session and sink available to tools executed within the agent call.
+            using var sessionScope = sessions.Use(session);
+            using var sinkScope = sinks.Use(sink);
+
+            await foreach (var chunk in agent.ProcessStreamAsync(
+                session.CurrentConversation,
+                userMessage,
+                CancellationToken.None))
+            {
+                switch (chunk.Type)
+                {
+                    case AgentChunkType.Sentence:
+                        // Stream this sentence to TTS immediately
+                        // First call cancels loading audio
+                        await pipeline.StreamSentenceAsync(streamContext, chunk.Text!);
+                        break;
+
+                    case AgentChunkType.ToolExecuting:
+                        logger.LogDebug("Tool executing: {Tool}", chunk.ToolName);
+                        // TODO: Could play a different "thinking" sound for tools
+                        break;
+
+                    case AgentChunkType.Complete:
+                        // Handled in finally block
+                        break;
+                }
+            }
+        }
+        finally
+        {
+            // Always end streaming (sends response_complete, logs stats)
+            await pipeline.EndStreamingAsync(streamContext);
+
+            // Apply tool-requested deactivation *after* the response completes.
+            if (session.IsDeactivationRequested)
+            {
+                session.Deactivate();
+                await sink.SendStatusAsync("deactivated");
+            }
+        }
+    }
+
     /// <summary>
     /// Check if the transcription contains the deactivation phrase.
     /// </summary>
@@ -131,14 +202,14 @@ public class WebSocketHandler(
     {
         return transcription.Contains(DeactivationPhrase, StringComparison.OrdinalIgnoreCase);
     }
-    
+
     /// <summary>
     /// Strip wake word patterns from the beginning of the transcription.
     /// </summary>
     private static string StripWakeWord(string transcription)
     {
         // Common patterns to strip (case-insensitive)
-        string[] patterns = 
+        string[] patterns =
         [
             "hey nyxie",
             "hey nixie",
@@ -149,9 +220,9 @@ public class WebSocketHandler(
             "nicky",
             "pixie"
         ];
-        
+
         var result = transcription.Trim();
-        
+
         foreach (var pattern in patterns)
         {
             if (result.StartsWith(pattern, StringComparison.OrdinalIgnoreCase))
@@ -160,16 +231,8 @@ public class WebSocketHandler(
                 break;
             }
         }
-        
-        return result.Trim();
-    }
 
-    private async Task EchoResponse(Stopwatch? pipelineTimer, string transcription, WebSocketMessageSink sink)
-    {
-        // Echo mode: Repeat what the user said (tests full STT -> TTS pipeline)
-        // TODO: Replace with actual LLM response
-        var responseText = $"You said [chuckle] {transcription}.";
-        await pipeline.StreamResponseAsync(sink, responseText, pipelineTimer);
+        return result.Trim();
     }
 
     private async Task ListenToConnection(WebSocket webSocket, byte[] buffer, VoiceSession session)
@@ -213,15 +276,15 @@ public class WebSocketHandler(
     private static async Task ProcessMessageAsync(VoiceSession session, byte[] buffer, int count)
     {
         var json = Encoding.UTF8.GetString(buffer, 0, count);
-        
+
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
-        
+
         if (!root.TryGetProperty("type", out var typeProp))
             return;
-        
+
         var messageType = ParseMessageType(typeProp.GetString());
-        
+
         switch (messageType)
         {
             case MessageType.AudioChunk:
