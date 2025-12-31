@@ -11,7 +11,7 @@ namespace EDDA.Server.Handlers;
 public sealed class WebSocketMessageSink(WebSocket socket) : IMessageSink
 {
     public bool IsConnected => socket.State == WebSocketState.Open;
-    
+
     public async ValueTask SendAsync(object payload, CancellationToken ct = default)
     {
         if (!IsConnected) return;
@@ -19,12 +19,22 @@ public sealed class WebSocketMessageSink(WebSocket socket) : IMessageSink
         var bytes = Encoding.UTF8.GetBytes(json);
         await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken: ct);
     }
-    
+
     /// <summary>
     /// Send a status message to the client (e.g., "active", "inactive", "deactivated").
     /// </summary>
     public async ValueTask SendStatusAsync(string state, CancellationToken ct = default)
     {
         await SendAsync(new { type = "status", state }, ct);
+    }
+
+    /// <summary>
+    /// Send a volume control message to the client.
+    /// </summary>
+    /// <param name="volume">Volume level (0-100 for absolute, or delta for relative)</param>
+    /// <param name="relative">If true, volume is a delta from current (+/-)</param>
+    public async ValueTask SendVolumeAsync(int volume, bool relative = false, CancellationToken ct = default)
+    {
+        await SendAsync(new { type = "set_volume", volume, relative }, ct);
     }
 }
