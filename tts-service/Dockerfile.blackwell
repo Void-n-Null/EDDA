@@ -1,5 +1,5 @@
 # EDDA TTS Service - Chatterbox Turbo (RTX 50-series Blackwell)
-# 
+#
 # Build: docker build -f Dockerfile.blackwell -t edda-tts-blackwell .
 # Run:   docker run --gpus all -p 5000:5000 edda-tts-blackwell
 #
@@ -46,6 +46,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application code
 COPY server.py .
 COPY blackwell_wrapper.py .
+
+# Create voice cache directory with correct ownership
+# This is mounted as a Docker volume for persistence
+RUN mkdir -p /tmp/edda-voice-cache && chown edda:edda /tmp/edda-voice-cache
 
 # Set ownership
 RUN chown -R edda:edda /app

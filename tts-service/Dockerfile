@@ -1,5 +1,5 @@
 # EDDA TTS Service - Chatterbox Turbo
-# 
+#
 # Build: docker build -t edda-tts .
 # Run:   docker run --gpus all -p 5000:5000 edda-tts
 #
@@ -34,6 +34,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy application code
 COPY server.py .
+
+# Create voice cache directory with correct ownership
+# This is mounted as a Docker volume for persistence
+RUN mkdir -p /tmp/edda-voice-cache && chown edda:edda /tmp/edda-voice-cache
 
 # Set ownership
 RUN chown -R edda:edda /app
