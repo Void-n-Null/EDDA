@@ -162,6 +162,12 @@ public class OpenRouterService : IOpenRouterService, IDisposable
             if (string.IsNullOrWhiteSpace(line))
                 continue;
 
+            // OpenRouter sometimes sends SSE comment/keepalive lines like:
+            // ": OPENROUTER PROCESSING"
+            // These are not data payloads and should be ignored silently.
+            if (line.StartsWith(':'))
+                continue;
+
             if (!line.StartsWith("data: "))
             {
                 _logger?.LogWarning("LLM STREAM: Unexpected line: {Line}", line);
@@ -269,17 +275,52 @@ public class OpenRouterService : IOpenRouterService, IDisposable
     private object BuildRequest(IEnumerable<ChatMessage> messages, ChatOptions? options, bool stream)
     {
         var messageList = messages.Select(m => BuildMessageObject(m)).ToList();
+        var selectedModel = options?.Model ?? _config.DefaultModel;
 
-        return new
+        // Use a dictionary so we can conditionally include optional fields without emitting nulls.
+        // NOTE: Dictionary keys are NOT transformed by JsonNamingPolicy, so use OpenAI/OpenRouter field names.
+        var req = new Dictionary<string, object?>
         {
-            model = options?.Model ?? _config.DefaultModel,
-            messages = messageList,
-            max_tokens = options?.MaxTokens ?? _config.MaxTokens,
-            temperature = options?.Temperature ?? _config.Temperature,
-            stream = options?.Stream ?? stream,
-            tools = options?.Tools,
-            tool_choice = options?.ToolChoice
+            ["model"] = selectedModel,
+            ["messages"] = messageList,
+            ["max_tokens"] = options?.MaxTokens ?? _config.MaxTokens,
+            ["temperature"] = options?.Temperature ?? _config.Temperature,
+            ["stream"] = options?.Stream ?? stream
         };
+
+        if (options?.Tools is not null)
+            req["tools"] = options.Tools;
+
+        if (options?.ToolChoice is not null)
+            req["tool_choice"] = options.ToolChoice;
+
+        // Force provider routing to reduce latency variance.
+        // OpenRouter accepts: { provider: { order: ["Google AI Studio"] } }
+        string? providerToForce = null;
+        
+        if (selectedModel == _config.DefaultModel && !string.IsNullOrWhiteSpace(_config.DefaultProvider))
+        {
+            providerToForce = _config.DefaultProvider;
+        }
+        else if (selectedModel == _config.FastModel && !string.IsNullOrWhiteSpace(_config.FastProvider))
+        {
+            providerToForce = _config.FastProvider;
+        }
+
+        if (providerToForce is not null)
+        {
+            _logger?.LogDebug(
+                "LLM: Forcing provider \"{Provider}\" for model {Model}",
+                providerToForce,
+                selectedModel);
+
+            req["provider"] = new
+            {
+                order = new[] { providerToForce }
+            };
+        }
+
+        return req;
     }
 
     private static object BuildMessageObject(ChatMessage message)

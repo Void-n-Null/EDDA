@@ -17,7 +17,7 @@ namespace EDDA.Server.Agent;
 /// - Streaming LLM responses with incremental sentence detection
 /// - Tool calling with automatic execution and continuation
 /// - Context injection via pluggable providers
-/// - Per-turn memory search for RAG
+/// - Per-turn memory search for RAG (injected into user messages)
 /// - Conversation state management
 /// </summary>
 public partial class EddaAgent : IAgent
@@ -67,6 +67,7 @@ public partial class EddaAgent : IAgent
     public async IAsyncEnumerable<AgentChunk> ProcessStreamAsync(
         Conversation conversation,
         string userMessage,
+        string? preloadedMemoryContext = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         // Build system prompt on first message
@@ -91,8 +92,19 @@ public partial class EddaAgent : IAgent
                 systemPrompt.Length);
         }
 
-        // Search memory for relevant context on EVERY turn
-        var memoryContext = await SearchMemoryAsync(userMessage, ct);
+        // Use preloaded memory context if provided, otherwise search
+        string? memoryContext;
+        if (preloadedMemoryContext != null)
+        {
+            memoryContext = preloadedMemoryContext;
+            _logger.LogDebug("AGENT: Using preloaded memory context ({Length} chars)", memoryContext.Length);
+        }
+        else
+        {
+            // Search memory for relevant context on every turn
+            // This gives per-turn relevance (vs system prompt which is only built once)
+            memoryContext = await SearchMemoryAsync(userMessage, ct);
+        }
         
         // Build user message with memory context if available
         string finalUserMessage;
@@ -106,7 +118,6 @@ public partial class EddaAgent : IAgent
             finalUserMessage = userMessage;
         }
 
-        // Add user message (with or without memory context)
         conversation.AddUserMessage(finalUserMessage);
 
         _logger.LogInformation(
@@ -320,6 +331,19 @@ public partial class EddaAgent : IAgent
                     result.Content.Length > 150 
                         ? result.Content[..150] + "..." 
                         : result.Content);
+            }
+
+            // Short-circuit for end_conversation: if we already have content, don't need Round 2
+            // The goodbye was already said alongside the tool call
+            var hasEndConversation = toolCalls.Any(t => t.Name == "end_conversation");
+            if (hasEndConversation && contentBuffer.Length > 0)
+            {
+                _logger.LogInformation(
+                    "AGENT: end_conversation called with content already provided ({Chars} chars), completing",
+                    contentBuffer.Length);
+                conversation.AddAssistantMessage(contentBuffer.ToString());
+                yield return AgentChunk.Complete();
+                yield break;
             }
 
             _logger.LogInformation("AGENT: Tool results added, continuing to round {Next}", toolRound + 1);

@@ -11,6 +11,67 @@ using EDDA.Server.Services.Session;
 namespace EDDA.Server.Handlers;
 
 /// <summary>
+/// Memory search options matching what EddaAgent uses internally.
+/// </summary>
+file static class MemorySearchHelper
+{
+    public static async Task<string?> SearchAndFormatAsync(
+        IConversationMemory memory,
+        string query,
+        ILogger logger,
+        CancellationToken ct = default)
+    {
+        if (!memory.IsInitialized)
+            return null;
+
+        try
+        {
+            var searchOptions = new TimeDecaySearchOptions
+            {
+                OversampleCount = 30,
+                RecencyWeight = 0.3f,
+                HalfLifeHours = 72f,
+                FinalCount = 5
+            };
+
+            var filter = new MemoryFilter
+            {
+                Types = ["exchange"]
+            };
+
+            var results = await memory.SearchWithTimeDecayAsync(query, searchOptions, filter, ct);
+
+            if (results.Count == 0)
+                return null;
+
+            logger.LogInformation(
+                "MEMORY: Found {Count} relevant memories (top score: {Score:F3})",
+                results.Count,
+                results[0].Score);
+
+            // Format memories for injection (same format as EddaAgent)
+            var sb = new StringBuilder();
+            foreach (var result in results)
+            {
+                var dateStr = result.Memory.CreatedAt.ToString("MMM d");
+                var content = result.Memory.Content;
+                if (content.Length > 200)
+                    content = content[..197] + "...";
+
+                sb.AppendLine($"- {dateStr}: {content}");
+            }
+
+            return sb.ToString().Trim();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "MEMORY: Speculative search failed, will retry in agent");
+            return null;
+        }
+    }
+}
+
+/// <summary>
 /// Handles WebSocket connections for voice interaction.
 /// Thin coordinator: delegates to VoiceSession for state, Agent for AI, and ResponsePipeline for TTS.
 /// </summary>
@@ -99,11 +160,21 @@ public class WebSocketHandler(
             return;
         }
 
-        // Inactive mode - check for wake word
+        // Inactive mode - check for wake word AND speculatively search memory in parallel
+        // This hides ~500ms of memory search latency behind the ~1000ms wake word check
         logger.LogDebug("Inactive mode, checking for wake word: \"{Text}\"",
             transcription.Length > 50 ? transcription[..50] + "..." : transcription);
 
-        var isWakeWord = await wakeWord.IsWakeWordAsync(transcription);
+        var strippedText = StripWakeWord(transcription);
+        
+        // Start both operations in parallel
+        var wakeWordTask = wakeWord.IsWakeWordAsync(transcription);
+        var memoryTask = !string.IsNullOrWhiteSpace(strippedText)
+            ? MemorySearchHelper.SearchAndFormatAsync(memory, strippedText, logger)
+            : Task.FromResult<string?>(null);
+
+        // Wait for wake word first (it's the gate)
+        var isWakeWord = await wakeWordTask;
 
         if (!isWakeWord)
         {
@@ -117,12 +188,11 @@ public class WebSocketHandler(
         session.Activate();
         await sink.SendStatusAsync("active");
 
-        // Strip the wake word from the transcription before processing
-        var strippedText = StripWakeWord(transcription);
-
         if (!string.IsNullOrWhiteSpace(strippedText) && session.CurrentConversation != null)
         {
-            await ProcessWithAgentAsync(session, sink, strippedText, pipelineTimer);
+            // Await the memory search (should be done or nearly done by now)
+            var preloadedMemory = await memoryTask;
+            await ProcessWithAgentAsync(session, sink, strippedText, pipelineTimer, preloadedMemory);
         }
         else
         {
@@ -136,11 +206,17 @@ public class WebSocketHandler(
     /// Process user message through the agent and stream TTS for each sentence.
     /// Uses the streaming API to play loading audio until first sentence, then stream sentences.
     /// </summary>
+    /// <param name="session">The voice session.</param>
+    /// <param name="sink">Message sink for sending responses.</param>
+    /// <param name="userMessage">The user's message to process.</param>
+    /// <param name="pipelineTimer">Timer for TTFA tracking.</param>
+    /// <param name="preloadedMemoryContext">Optional pre-fetched memory context (for parallel wake word + memory search).</param>
     private async Task ProcessWithAgentAsync(
         VoiceSession session,
         WebSocketMessageSink sink,
         string userMessage,
-        Stopwatch? pipelineTimer)
+        Stopwatch? pipelineTimer,
+        string? preloadedMemoryContext = null)
     {
         if (session.CurrentConversation == null)
         {
@@ -160,6 +236,7 @@ public class WebSocketHandler(
             await foreach (var chunk in agent.ProcessStreamAsync(
                 session.CurrentConversation,
                 userMessage,
+                preloadedMemoryContext,
                 CancellationToken.None))
             {
                 switch (chunk.Type)

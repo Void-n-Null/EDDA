@@ -112,19 +112,26 @@ public class OpenRouterEmbeddingService : IEmbeddingService, IDisposable
             return [];
 
         // Build request with dimensions parameter for Matryoshka support
+        // Force DeepInfra provider for lower latency (testing)
         var request = new
         {
             model = _model,
             input = textList,
-            dimensions = _dimensions
+            dimensions = _dimensions,
+            provider = new
+            {
+                order = new[] { "DeepInfra" }
+            }
         };
 
         var json = JsonSerializer.Serialize(request);
         var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-        _logger?.LogInformation("EMBED: Generating embeddings for {Count} text(s) ({Dims}d)...", textList.Count, _dimensions);
+        _logger?.LogInformation("EMBED: Generating embeddings for {Count} text(s) ({Dims}d) [provider: DeepInfra]...", textList.Count, _dimensions);
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         var response = await _http.PostAsync("embeddings", content, ct);
+        sw.Stop();
         
         if (!response.IsSuccessStatusCode)
         {
@@ -135,6 +142,8 @@ public class OpenRouterEmbeddingService : IEmbeddingService, IDisposable
         }
 
         var responseJson = await response.Content.ReadAsStringAsync(ct);
+        
+        _logger?.LogInformation("EMBED: Completed in {Ms}ms", sw.ElapsedMilliseconds);
         
         return ParseEmbeddingResponse(responseJson);
     }

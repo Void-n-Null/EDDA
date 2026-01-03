@@ -11,11 +11,13 @@ public interface IAgent
     /// </summary>
     /// <param name="conversation">The current conversation state.</param>
     /// <param name="userMessage">The user's transcribed speech.</param>
+    /// <param name="preloadedMemoryContext">Optional pre-fetched memory context (skips internal search if provided).</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>Stream of agent output chunks (sentences, tool status, completion).</returns>
     IAsyncEnumerable<AgentChunk> ProcessStreamAsync(
         Conversation conversation,
         string userMessage,
+        string? preloadedMemoryContext = null,
         CancellationToken ct = default);
 }
 

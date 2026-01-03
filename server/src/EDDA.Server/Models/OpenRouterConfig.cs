@@ -26,9 +26,22 @@ public class OpenRouterConfig
     public string DefaultModel { get; init; } = "google/gemini-3-flash-preview";
 
     /// <summary>
-    /// Model to use for fast, cheap operations (e.g., wake word detection).
+    /// Preferred provider for the default model (OpenRouter routing hint).
+    /// Example: "Google AI Studio".
+    /// Set to empty to allow OpenRouter to choose automatically.
     /// </summary>
-    public string FastModel { get; init; } = "anthropic/claude-haiku-4.5";
+    public string DefaultProvider { get; init; } = "Google AI Studio";
+
+    /// <summary>
+    /// Model to use for fast, cheap operations (e.g., wake word detection).
+    /// Gemini 2.5 Flash Lite is extremely fast and cheap for simple YES/NO tasks.
+    /// </summary>
+    public string FastModel { get; init; } = "google/gemini-2.5-flash-lite-preview-09-2025";
+
+    /// <summary>
+    /// Preferred provider for the fast model (OpenRouter routing hint).
+    /// </summary>
+    public string FastProvider { get; init; } = "Google AI Studio";
 
     /// <summary>
     /// Maximum tokens for response generation.
@@ -89,7 +102,9 @@ public class OpenRouterConfig
             ApiKey = apiKey,
             BaseUrl = ParseStringEnv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/"),
             DefaultModel = ParseStringEnv("OPENROUTER_DEFAULT_MODEL", "google/gemini-3-flash-preview"),
-            FastModel = ParseStringEnv("OPENROUTER_FAST_MODEL", "anthropic/claude-haiku-4.5"),
+            DefaultProvider = ParseStringEnv("OPENROUTER_DEFAULT_PROVIDER", "Google AI Studio"),
+            FastModel = ParseStringEnv("OPENROUTER_FAST_MODEL", "google/gemini-2.5-flash-lite-preview-09-2025"),
+            FastProvider = ParseStringEnv("OPENROUTER_FAST_PROVIDER", "Google AI Studio"),
             MaxTokens = ParseIntEnv("OPENROUTER_MAX_TOKENS", 4096),
             Temperature = ParseFloatEnv("OPENROUTER_TEMPERATURE", 0.7f),
             TimeoutSeconds = ParseIntEnv("OPENROUTER_TIMEOUT_SECONDS", 120),

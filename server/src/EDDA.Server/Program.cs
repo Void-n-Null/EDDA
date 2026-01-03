@@ -1,4 +1,4 @@
-﻿using EDDA.Server.Agent;
+using EDDA.Server.Agent;
 using EDDA.Server.Agent.Context;
 using EDDA.Server.Agent.Context.Providers;
 using EDDA.Server.Handlers;
@@ -73,8 +73,9 @@ builder.Services.AddSingleton<IOpenRouterService>(sp =>
 builder.Services.AddSingleton<IWakeWordService>(sp =>
 {
     var llm = sp.GetRequiredService<IOpenRouterService>();
+    var config = sp.GetRequiredService<OpenRouterConfig>();
     var logger = sp.GetRequiredService<ILogger<WakeWordService>>();
-    return new WakeWordService(llm, logger);
+    return new WakeWordService(llm, config, logger);
 });
 
 // ============================================================================
@@ -120,14 +121,9 @@ builder.Services.AddSingleton<IConversationMemory>(sp =>
 // ============================================================================
 
 // Context providers (modular - add new providers here)
+// Note: Memory context is handled per-turn in EddaAgent, not here in the system prompt
 builder.Services.AddSingleton<IContextProvider, TimeContextProvider>();
 builder.Services.AddSingleton<IContextProvider, ConversationContextProvider>();
-builder.Services.AddSingleton<IContextProvider>(sp =>
-{
-    var memory = sp.GetRequiredService<IConversationMemory>();
-    var logger = sp.GetService<ILogger<MemoryContextProvider>>();
-    return new MemoryContextProvider(memory, logger);
-});
 
 // Context builder (combines all providers)
 builder.Services.AddSingleton<ContextBuilder>();
