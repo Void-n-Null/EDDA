@@ -13,7 +13,7 @@ import yaml
 
 import websockets
 
-from edda.audio import AudioDevice, AudioProcessor, AudioPlayer
+from edda.audio import AudioDevice, AudioProcessor, AudioPlayer, EchoCanceller, AecConfig
 from edda.audio.device import AudioConfig, AudioStallError
 from edda.cache import CacheManager
 from edda.network import ServerConnection, MessageHandler
@@ -66,6 +66,8 @@ async def run_session(websocket, components: dict, config: dict) -> None:
         components["detector"],
         components["connection"],
         stall_timeout=config.get("audio", {}).get("stall_timeout", 5.0),
+        echo_canceller=components.get("echo_canceller"),
+        audio_player=components["player"],
     )
 
     # Run input and output pipelines concurrently
@@ -127,6 +129,7 @@ def init_components(config: dict) -> dict:
     vad_cfg = config.get("vad", {})
     cache_cfg = config.get("cache", {})
     server_cfg = config.get("server", {})
+    aec_cfg = config.get("aec", {})
 
     # Audio config
     audio_config = AudioConfig(
@@ -134,7 +137,10 @@ def init_components(config: dict) -> dict:
         target_rate=audio_cfg.get("target_rate", 16000),
         chunk_size=audio_cfg.get("chunk_size", 1440),
         channels=audio_cfg.get("channels", 1),
-        input_device_name=audio_cfg.get("input_device_name", "SoloCast"),
+        input_device_name=audio_cfg.get("input_device_name", "default"),
+        echo_cancellation=audio_cfg.get("echo_cancellation", True),
+        vad_threshold_normal=vad_cfg.get("threshold", 0.5),
+        vad_threshold_playback=audio_cfg.get("vad_threshold_playback", 0.92),
     )
 
     # Audio device
@@ -150,6 +156,24 @@ def init_components(config: dict) -> dict:
         device.close()
         sys.exit(1)
 
+    # Echo canceller (AEC) - speexdsp-based echo cancellation
+    echo_canceller = None
+    if audio_cfg.get("echo_cancellation", True) and aec_cfg.get("enabled", True):
+        aec_config = AecConfig(
+            sample_rate=audio_cfg.get("target_rate", 16000),
+            frame_size=aec_cfg.get("frame_size", 160),  # 10ms at 16kHz
+            filter_length_ms=aec_cfg.get("filter_length_ms", 400),  # 400ms echo tail
+            enable_preprocess=aec_cfg.get("enable_preprocess", True),
+            buffer_duration_ms=aec_cfg.get("buffer_duration_ms", 5000),
+            speaker_to_mic_delay_ms=aec_cfg.get("speaker_to_mic_delay_ms", 50),
+        )
+        echo_canceller = EchoCanceller(aec_config)
+        if echo_canceller.initialize():
+            logger.info("AEC (speexdsp) initialized successfully")
+        else:
+            logger.warning("AEC initialization failed, falling back to threshold-based filtering")
+            echo_canceller = None
+
     # Speech detection
     speech_config = SpeechConfig.from_audio_config(
         chunk_size=audio_config.chunk_size,
@@ -164,7 +188,7 @@ def init_components(config: dict) -> dict:
     return {
         "device": device,
         "processor": processor,
-        "player": AudioPlayer(),
+        "player": AudioPlayer(echo_canceller=echo_canceller),
         "detector": SpeechDetector(speech_config),
         "cache": CacheManager(
             cache_dir=cache_cfg.get("directory", "./cache"),
@@ -172,6 +196,7 @@ def init_components(config: dict) -> dict:
             max_size_mb=cache_cfg.get("max_size_mb", 100),
         ),
         "connection": ServerConnection(server_url),
+        "echo_canceller": echo_canceller,
     }
 
 

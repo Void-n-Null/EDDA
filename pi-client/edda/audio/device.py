@@ -12,7 +12,12 @@ class AudioConfig:
     target_rate: int = 16000
     chunk_size: int = 1440
     channels: int = 1
-    input_device_name: str = "SoloCast"  # Substring match
+    input_device_name: str = "default"  # "default" uses system default, otherwise substring match
+    echo_cancellation: bool = True  # If True, use EC + elevated threshold during playback
+    
+    # VAD thresholds - elevated threshold during playback helps filter residual echo
+    vad_threshold_normal: float = 0.5  # Normal threshold when not playing
+    vad_threshold_playback: float = 0.99  # Very high threshold during playback (AEC not effective)
 
 
 class AudioStallError(Exception):
@@ -77,10 +82,46 @@ class AudioDevice:
         return True
     
     def _find_input_device(self) -> Optional[int]:
-        """Find the configured input device by name substring match."""
+        """
+        Find the configured input device.
+        
+        Special values:
+        - "default": Use system default input device (recommended for PipeWire/echo cancellation)
+        - "pulse": Explicitly use PulseAudio/PipeWire
+        - Any other string: Substring match against device names
+        """
         if self._pyaudio is None:
             return None
         
+        # Handle special device names
+        if self.config.input_device_name.lower() in ("default", "pulse"):
+            # Find the device named "default" or "pulse" for PipeWire routing
+            for i in range(self._pyaudio.get_device_count()):
+                dev = self._pyaudio.get_device_info_by_index(i)
+                if dev['name'].lower() == self.config.input_device_name.lower():
+                    if dev['maxInputChannels'] > 0:
+                        dev_info = dev
+                        print(f"Using input device {i}: {dev_info['name']} (PipeWire)")
+                        print(f"  Native rate: {dev_info['defaultSampleRate']} Hz")
+                        print(f"  Capture at: {self.config.capture_rate} Hz -> Resample to: {self.config.target_rate} Hz")
+                        if self.config.echo_cancellation:
+                            print(f"  Echo cancellation: enabled (via PipeWire)")
+                        return i
+            
+            # Fallback: try to get system default
+            try:
+                default = self._pyaudio.get_default_input_device_info()
+                print(f"Using system default input device: {default['name']}")
+                print(f"  Native rate: {default['defaultSampleRate']} Hz")
+                print(f"  Capture at: {self.config.capture_rate} Hz -> Resample to: {self.config.target_rate} Hz")
+                if self.config.echo_cancellation:
+                    print(f"  Echo cancellation: enabled (via PipeWire)")
+                return default['index']
+            except IOError:
+                print("Error: No default input device available")
+                return None
+        
+        # Standard substring match for explicit device selection
         device_index = None
         for i in range(self._pyaudio.get_device_count()):
             dev = self._pyaudio.get_device_info_by_index(i)

@@ -1,11 +1,18 @@
 [Unit]
 Description=EDDA Voice Client
 After=network.target sound.target
+# Note: PipeWire is a user service, so we wait for it in ExecStartPre
 
 [Service]
 Type=simple
 User=blake
 WorkingDirectory=/home/blake/edda-voice-client
+
+# Wait for PipeWire/PulseAudio to be ready before starting
+# This prevents the race condition where the client grabs raw ALSA devices
+# XDG_RUNTIME_DIR is needed for pactl to find the PipeWire socket
+ExecStartPre=/bin/bash -c 'export XDG_RUNTIME_DIR=/run/user/1000; for i in $(seq 1 30); do pactl info >/dev/null 2>&1 && exit 0; sleep 1; done; echo "PipeWire not ready after 30s"; exit 1'
+
 ExecStart=/home/blake/edda-voice-client/venv/bin/python3 -u client.py
 Restart=always
 RestartSec=5
@@ -18,6 +25,9 @@ SyslogIdentifier=edda-client
 # Capture all output, including crashes
 # -u ensures unbuffered Python output
 Environment=PYTHONUNBUFFERED=1
+# Required for PipeWire/PulseAudio connection from system service
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PULSE_RUNTIME_PATH=/run/user/1000/pulse
 
 # Kill entire process group on stop (clean shutdown)
 KillMode=mixed

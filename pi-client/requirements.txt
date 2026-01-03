@@ -6,4 +6,5 @@ scipy
 torch==2.1.0
 torchaudio==2.1.0
 packaging
+pyaec>=1.0.1
 

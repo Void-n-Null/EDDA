@@ -3,13 +3,51 @@ server:
   port: 8080
 
 audio:
-  # Capture at 44.1kHz (HyperX SoloCast native), resample to 16kHz for Whisper/VAD
+  # Capture at 44.1kHz, resample to 16kHz for Whisper/VAD
   capture_rate: 44100
   target_rate: 16000
   chunk_size: 1412  # 32ms at 44.1kHz → 512 samples at 16kHz (Silero needs EXACTLY 512)
   channels: 1
-  input_device_name: "SoloCast"  # Substring match for input device
+  # "default" uses PipeWire's default source
+  # For direct device access, use substring match like "SoloCast"
+  input_device_name: "default"
   stall_timeout: 5.0  # Seconds before treating audio device as stalled
+  
+  # Echo cancellation enable/disable
+  # When enabled, uses speexdsp AEC (application-level, no PipeWire dependency)
+  echo_cancellation: true
+  
+  # VAD threshold during playback (fallback when AEC isn't fully suppressing echo)
+  # Higher = harder to trigger = filters out more residual echo
+  vad_threshold_playback: 0.8
+
+# Acoustic Echo Cancellation (speexdsp-based)
+# Runs entirely in Python - no PipeWire/system config needed
+aec:
+  # Enable/disable AEC (if disabled, falls back to threshold-based filtering)
+  enabled: true
+  
+  # Frame size in samples (10ms at 16kHz = 160)
+  # Smaller = lower latency, larger = more stable
+  frame_size: 160
+  
+  # Filter length in milliseconds (echo tail length)
+  # Typical room: 200-400ms. Reverberant room: 400-600ms.
+  filter_length_ms: 400
+  
+  # Estimated delay from speaker output to mic capture (ms)
+  # This accounts for:
+  # - ALSA/aplay buffer latency (variable, depends on buffer fill)
+  # - Acoustic path from speaker to mic (~1-5ms depending on distance)
+  # - PyAudio capture buffer (~10-20ms)
+  # Tuning: 50ms=too early, 300ms=too late, 150ms=close but drifts.
+  speaker_to_mic_delay_ms: 160
+  
+  # Enable speexdsp preprocessor (noise suppression, AGC)
+  enable_preprocess: true
+  
+  # How much playback audio to buffer (in ms) for synchronization
+  buffer_duration_ms: 5000
 
 vad:
   # Speech detection threshold (0.0-1.0)
